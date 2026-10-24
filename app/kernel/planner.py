@@ -16,13 +16,14 @@ from typing import Dict, List, Optional
 
 from app.kernel import approval
 
-ALLOWED_TOOLS = ("log_tail", "log_grep", "list_files")
+ALLOWED_TOOLS = ("log_tail", "log_grep", "list_files", "log_rolling_tail")
 
 # 每个工具允许的参数键；其余键（可能包含危险指令）直接丢弃
 _TOOL_PARAM_KEYS: Dict[str, tuple] = {
     "log_tail": ("path", "n", "keyword"),
     "log_grep": ("path", "pattern", "limit"),
     "list_files": ("dir",),
+    "log_rolling_tail": ("dir", "pattern", "n", "max_files"),
 }
 
 
@@ -113,7 +114,7 @@ def _validate_candidate(cand: dict, tools, log_path: str, auto_approve_readonly:
     if tool == "log_grep" and not str(params.get("pattern", "")).strip():
         return None
 
-    for key in ("n", "limit"):
+    for key in ("n", "limit", "max_files"):
         if key in params:
             try:
                 params[key] = int(params[key])

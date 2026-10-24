@@ -9,10 +9,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from app import __version__
 from app.config import settings
 from app.deps import get_llm, get_loop, get_memory, get_tools
+from app.kernel.state import Phase
 from app.tools.log_reader import LogReadError, check_readable, recent_errors
 
 router = APIRouter()
@@ -54,9 +56,19 @@ def logs_recent_errors(limit: int = Query(default=None, ge=1, le=200)):
     }
 
 
-@router.post("/episodes")
+@router.post("/episodes", status_code=202)
 def create_episode(trigger: str = Query(default="recent_errors")):
-    """启动一次自我迭代（Observe → Analyze → Propose → 审批/执行）。"""
+    """异步启动一次自我迭代：立即返回 202 + episode_id，后台执行（轮询 GET /episodes/{id}）。"""
+    episode_id = get_loop().start_async(trigger=trigger)
+    return JSONResponse(
+        status_code=202,
+        content={"episode_id": episode_id, "phase": Phase.CREATED.value},
+    )
+
+
+@router.post("/episodes/sync")
+def create_episode_sync(trigger: str = Query(default="recent_errors")):
+    """同步启动（调试用）：阻塞直到本轮迭代到达终态/审批点，返回完整 episode。"""
     episode = get_loop().start(trigger=trigger)
     return episode.to_dict()
 

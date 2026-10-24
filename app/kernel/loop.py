@@ -8,13 +8,14 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from app.kernel import approval
 from app.kernel.planner import propose_tasks
 from app.kernel.state import Episode, Phase
-from app.tools import log_reader
+from app.tools import clusterer, log_reader
 
 
 def _now() -> str:
@@ -31,6 +32,11 @@ class EvolutionLoop:
         self.llm = llm
         self.auto_approve_readonly = bool(auto_approve_readonly)
         self._episodes: Dict[str, Episode] = {}
+        # 异步执行：loop 内部全是同步代码，线程池比 BackgroundTasks 更简单直接
+        self._executor = ThreadPoolExecutor(
+            max_workers=max(1, int(getattr(settings, "async_workers", 2))),
+            thread_name_prefix="moray-loop",
+        )
 
     # ---------- 公开 API ----------
 
@@ -44,6 +50,29 @@ class EvolutionLoop:
             self._fail(ep, exc)
         self.memory.save(ep)
         return ep
+
+    def start_async(self, trigger: str = "recent_errors") -> str:
+        """异步入口：立即创建 Episode（phase=created）丢到后台执行，返回 episode_id。
+
+        转移链：created -> queued（已入队未开始）-> observing -> ...
+        供 POST /episodes 使用，避免 LLM 慢时 HTTP 长阻塞。
+        """
+        ep = Episode.new(trigger=trigger)
+        self._episodes[ep.id] = ep
+        self.memory.save(ep)
+        self._executor.submit(self._run_background, ep)
+        return ep.id
+
+    def _run_background(self, ep: Episode) -> None:
+        try:
+            if ep.phase == Phase.CREATED:
+                ep.transition(Phase.QUEUED)
+                self.memory.save(ep)
+            self._run(ep)
+        except Exception as exc:
+            self._fail(ep, exc)
+        finally:
+            self.memory.save(ep)
 
     def resume(self, episode_id: str) -> Episode:
         ep = self.require(episode_id)
@@ -154,6 +183,13 @@ class EvolutionLoop:
         self._conclude(ep)
 
     def _observe(self, ep: Episode) -> None:
+        log_dir = str(getattr(self.settings, "log_dir", "") or "").strip()
+        if log_dir:
+            self._observe_rolling(ep, log_dir)
+        else:
+            self._observe_single(ep)
+
+    def _observe_single(self, ep: Episode) -> None:
         # 白名单校验：log_path 必须落在只读根内，越界抛 PermissionError
         checked = self.tools._check_path(self.settings.log_path)
         errors = log_reader.recent_errors(
@@ -165,13 +201,45 @@ class EvolutionLoop:
             {
                 "iteration": ep.iteration,
                 "kind": "recent_errors",
+                "mode": "single",
                 "source": str(checked),
                 "errors": [e.to_dict() for e in errors],
             }
         )
 
+    def _observe_rolling(self, ep: Episode, log_dir: str) -> None:
+        """滚动日志聚合观察：按 glob 跨文件取最近 N 条 ERROR（仍受白名单约束）。"""
+        checked = self.tools._check_path(str(log_dir))
+        pattern = str(getattr(self.settings, "log_glob_pattern", "moray.err.log*"))
+        lines = log_reader.read_rolling(
+            checked,
+            pattern,
+            n=self.settings.recent_error_limit,
+            max_files=5,
+            max_scan_bytes=self.settings.max_scan_bytes,
+            keyword="ERROR",
+        )
+        ep.observations.append(
+            {
+                "iteration": ep.iteration,
+                "kind": "recent_errors",
+                "mode": "rolling",
+                "source": str(checked),
+                "glob": pattern,
+                "errors": [{"text": text} for text in lines],
+            }
+        )
+
     def _analyze(self, ep: Episode) -> None:
-        errors = self._last_errors(ep)
+        raw_errors = self._last_errors(ep)
+        # 聚类后再喂 LLM：同类错误重复 N 次没有增量信息，逐行喂只浪费 token
+        clusters = clusterer.cluster(
+            raw_errors, top_n=int(getattr(self.settings, "cluster_top_n", 10))
+        )
+        clustered_errors = [
+            "[x{}] {} | 样本: {}".format(c["count"], c["template"], c["sample_line"])
+            for c in clusters
+        ]
         extra = [o for o in ep.observations if o.get("kind") != "recent_errors"]
         lessons = [r["lesson"] for r in self.memory.recent_reflections(limit=5)]
         failed = self._failed_tasks(ep)
@@ -180,12 +248,12 @@ class EvolutionLoop:
         if self.llm is not None and self.llm.is_available():
             try:
                 analysis = self.llm.analyze(
-                    errors=errors, extra=extra, lessons=lessons, failed=failed
+                    errors=clustered_errors, extra=extra, lessons=lessons, failed=failed
                 )
             except Exception:
                 analysis = None  # LLM 抖动 → 启发式兜底
         if not isinstance(analysis, dict) or analysis.get("parse_error"):
-            analysis = self._heuristic_analysis(errors)
+            analysis = self._heuristic_analysis(clustered_errors)
         ep.analysis = analysis
         self.memory.save(ep)
 
@@ -255,10 +323,11 @@ class EvolutionLoop:
 
     def _reflect(self, ep: Episode) -> None:
         done = sum(1 for t in ep.tasks if t.get("status") == "done")
+        empty = sum(1 for t in ep.tasks if t.get("status") == "empty")
         failed = sum(1 for t in ep.tasks if t.get("status") == "failed")
         lesson = (
-            "trigger={} iterations={} tasks={}(done={},failed={}) conclusion={}".format(
-                ep.trigger, ep.iteration, len(ep.tasks), done, failed, ep.conclusion
+            "trigger={} iterations={} tasks={}(done={},empty={},failed={}) conclusion={}".format(
+                ep.trigger, ep.iteration, len(ep.tasks), done, empty, failed, ep.conclusion
             )
         )
         self.memory.record_reflection(ep.id, lesson)

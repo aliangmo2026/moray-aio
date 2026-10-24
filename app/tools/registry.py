@@ -27,6 +27,7 @@ class ToolRegistry:
         self.register("log_tail", self._tool_log_tail)
         self.register("log_grep", self._tool_log_grep)
         self.register("list_files", self._tool_list_files)
+        self.register("log_rolling_tail", self._tool_log_rolling_tail)
 
     def register(self, name: str, fn: Callable[..., Any]) -> None:
         self._tools[name] = fn
@@ -92,6 +93,19 @@ class ToolRegistry:
                 entries.append("file\t{}\t{}".format(child.name, size))
         return entries
 
+    def _tool_log_rolling_tail(
+        self, dir: str, pattern: str = "moray.err.log*", n: int = 50, max_files: int = 5
+    ) -> list:
+        """滚动日志聚合尾部：dir 必须在白名单内，pattern 为 glob（如 moray.err.log*）。"""
+        checked = self._check_path(str(dir))
+        return log_reader.read_rolling(
+            checked,
+            str(pattern or "moray.err.log*"),
+            int(n),
+            max_files=int(max_files),
+            max_scan_bytes=self.max_scan_bytes,
+        )
+
     # ---- 分发 ----
 
     def call(self, name: str, params: dict = None) -> Any:
@@ -110,5 +124,6 @@ class ToolRegistry:
                 "- log_tail(path: str, n: int = 50, keyword: str = null) -> 日志尾部 n 行（时间正序，可按关键词过滤）",
                 "- log_grep(path: str, pattern: str, limit: int = 100) -> 尾部正则匹配的日志行（时间正序）",
                 "- list_files(dir: str) -> 列出目录内容（默认: {}）".format(default_dir),
+                "- log_rolling_tail(dir: str, pattern: str = \"moray.err.log*\", n: int = 50, max_files: int = 5) -> 跨滚动日志文件聚合的尾部行（时间正序）",
             ]
         )

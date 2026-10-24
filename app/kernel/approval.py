@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Set
 
-READONLY_TOOLS: Set[str] = {"log_tail", "log_grep", "list_files"}
+READONLY_TOOLS: Set[str] = {"log_tail", "log_grep", "list_files", "log_rolling_tail"}
 
 # 命中任意 token（子串匹配，忽略大小写）即判为 high
 HIGH_RISK_TOKENS: Set[str] = {"kill", "reboot", "restart", "shutdown", "rm ", "del ", "format"}

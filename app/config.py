@@ -33,7 +33,7 @@ class Settings:
     """只读配置。默认值面向 MoRay 主项目，可用 MORAY_AIO_* 环境变量覆盖。"""
 
     app_name: str = "moray-aio"
-    version: str = "0.2.0"
+    version: str = "0.3.0"
 
     # HTTP 服务
     host: str = field(default_factory=lambda: _env_str("MORAY_AIO_HOST", "127.0.0.1"))
@@ -77,6 +77,17 @@ class Settings:
     memory_db_path: str = field(
         default_factory=lambda: _env_str("MORAY_AIO_MEMORY_DB_PATH", "data/memory.sqlite3")
     )
+    # 异步执行：后台线程池大小（POST /episodes 立即返回 202，后台跑内核）
+    async_workers: int = field(default_factory=lambda: _env_int("MORAY_AIO_ASYNC_WORKERS", 2))
+
+    # 日志滚动聚合：配置了 log_dir 就优先按 glob 聚合读取（如 moray.err.log / .1 / 带日期后缀）
+    log_dir: str = field(default_factory=lambda: _env_str("MORAY_AIO_LOG_DIR", ""))
+    log_glob_pattern: str = field(
+        default_factory=lambda: _env_str("MORAY_AIO_LOG_GLOB_PATTERN", "moray.err.log*")
+    )
+
+    # 错误聚类：喂给 LLM 的最大类数
+    cluster_top_n: int = field(default_factory=lambda: _env_int("MORAY_AIO_CLUSTER_TOP_N", 10))
 
     @property
     def readonly_roots(self) -> list:

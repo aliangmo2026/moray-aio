@@ -1,13 +1,14 @@
 """moray-aio 一键演示脚本（仅标准库，无额外依赖）。
 
 自动连接本机 moray-aio 服务（默认 http://127.0.0.1:8020），
-现场观看 Agent 自驱只读分析的全过程：
+以异步模式现场观看 Agent 自驱只读分析的全过程：
 
-    POST /episodes
-    → 若停在 awaiting_approval：
+    POST /episodes                     → 202 + episode_id（后台执行）
+    轮询 GET /episodes/{id}（每 2 秒，最多 60 次）
+    → phase=awaiting_approval 时：
         POST /episodes/{id}/tasks/approve-all   （服务端只批只读白名单内的任务）
         POST /episodes/{id}/resume
-    → 循环，直到 phase=concluded / failed（或达到轮数上限）
+    → 直到 phase=concluded / failed
     → 打印最终结论与长效记忆（反思记录）
 
 用法：
@@ -20,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -27,7 +29,8 @@ from urllib.request import Request, urlopen
 DEFAULT_BASE_URL = "http://127.0.0.1:8020"
 # 演示脚本的连接目标白名单：只允许连本机 moray-aio 服务
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
-MAX_ROUNDS = 12
+POLL_INTERVAL_SECONDS = 2
+MAX_POLLS = 60
 
 
 def validate_base_url(base_url: str) -> str:
@@ -121,34 +124,44 @@ def main():
         base = sys.argv[1]
     origin = validate_base_url(base)
 
-    print("== moray-aio 一键演示 ==")
+    print("== moray-aio 一键演示（异步模式）==")
     print("目标服务: {}".format(origin))
-    print("说明: 本脚本只调用只读分析接口；approve-all 只会批准服务端白名单内的只读任务。\n")
+    print("说明: 只调用只读分析接口；approve-all 只会批准服务端白名单内的只读任务。\n")
 
-    ep = api(origin, "POST", "/episodes")
-    if ep is None:
+    created = api(origin, "POST", "/episodes")
+    if created is None:
         raise SystemExit(1)
+    episode_id = created["episode_id"]
+    print("已创建 episode: {}（phase={}，后台执行中）".format(episode_id, created.get("phase")))
 
-    for round_no in range(1, MAX_ROUNDS + 1):
-        print("---- 第 {} 轮 ----".format(round_no))
-        print_episode(ep)
+    ep = None
+    last_signature = None
+    for poll in range(1, MAX_POLLS + 1):
+        ep = api(origin, "GET", "/episodes/{}".format(episode_id))
+        if ep is None:
+            raise SystemExit(1)
         phase = ep.get("phase")
+        signature = (phase, ep.get("iteration"), len(ep.get("tasks") or []))
+        if signature != last_signature:
+            print("[poll {:02d}] phase={} iteration={} tasks={}".format(
+                poll, phase, ep.get("iteration"), len(ep.get("tasks") or [])))
+            analysis = ep.get("analysis") or {}
+            if analysis.get("summary"):
+                print("  [分析] " + short(analysis.get("summary"), 96))
+            last_signature = signature
+
         if phase == "awaiting_approval":
             print("待审批任务:")
             print_tasks(ep.get("tasks"), statuses={"proposed"})
             print(">> 批量批准只读任务 (approve-all) ...")
-            ep = api(origin, "POST", "/episodes/{}/tasks/approve-all".format(ep["id"]))
-            if ep is None:
-                raise SystemExit(1)
+            ep = api(origin, "POST", "/episodes/{}/tasks/approve-all".format(episode_id)) or ep
             print(">> 恢复迭代 (resume) ...")
-            ep = api(origin, "POST", "/episodes/{}/resume".format(ep["id"]))
-            if ep is None:
-                raise SystemExit(1)
+            ep = api(origin, "POST", "/episodes/{}/resume".format(episode_id)) or ep
+            last_signature = None  # resume 后强制重印一次新状态
             continue
         if phase in ("concluded", "failed"):
             break
-        print(">> 状态为 {}，无需审批，结束轮询".format(phase))
-        break
+        time.sleep(POLL_INTERVAL_SECONDS)
 
     print("\n==== 最终结果 ====")
     print_episode(ep, header="最终 episode:")

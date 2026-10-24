@@ -43,7 +43,7 @@ ANALYZE_USER = """\
 历史教训（recent reflections）：
 {lessons}
 
-最近的 ERROR 日志（时间正序）：
+错误聚类结果（以下是 {n_classes} 类错误，每类附出现次数 [×N] 和一条样本行；同类错误已折叠，分析时以类为单位）：
 {errors}
 
 补充观察（此前只读任务的结果）：

@@ -86,9 +86,10 @@ $env:MORAY_AIO_LOG_PATH       = "C:\temp\demo-logs\moray.err.log"
 | --- | --- | --- |
 | GET | `/health` | 健康检查；`log` 字段为目标日志的只读探测（exists/readable/size_bytes） |
 | GET | `/logs/recent-errors?limit=10` | 最近 N 条 ERROR（时间正序）；文件不存在 404，白名单外 403 |
-| POST | `/episodes?trigger=recent_errors` | 启动一次自我迭代，返回 episode（含 phase/tasks） |
+| POST | `/episodes?trigger=recent_errors` | **异步**启动迭代：202 + `{episode_id, phase:"created"}`，后台执行，轮询下一条接口 |
+| POST | `/episodes/sync` | 同步启动（调试用）：阻塞到终态/审批点，返回完整 episode |
 | GET | `/episodes?limit=20` | 最近的 episode 列表 |
-| GET | `/episodes/{id}` | 单个 episode 详情 |
+| GET | `/episodes/{id}` | 单个 episode 详情（异步轮询用） |
 | POST | `/episodes/{id}/tasks/{task_id}/approve` | 批准待审批任务；非只读工具 403 |
 | POST | `/episodes/{id}/tasks/{task_id}/reject` | 否决待审批任务 |
 | POST | `/episodes/{id}/tasks/approve-all` | 批量批准：仅 proposed 且只读白名单内的任务 |
@@ -108,20 +109,44 @@ python scripts/demo.py
 # 或 set MORAY_AIO_DEMO_URL=http://127.0.0.1:8020
 ```
 
-脚本（仅标准库 urllib）会自动：POST /episodes → 打印 phase 与待审批任务 →
-approve-all（服务端只批只读白名单内的任务）→ resume → 循环直到
-`concluded/failed`，最后打印结论与长效记忆（反思记录），方便一键观看
-Agent 自驱分析的全过程。
+脚本（仅标准库 urllib）走**异步模式**：POST /episodes 拿到 202 + episode_id →
+每 2 秒轮询 GET /episodes/{id}（最多 60 次）→ phase 变成 awaiting_approval 时
+自动 approve-all（服务端只批只读白名单内的任务）+ resume → 直到 concluded/failed，
+最后打印结论与长效记忆（反思记录），一键观看 Agent 自驱分析全过程。
 
 想在本地临时日志上体验（不动 D:\MoRay）：
 
 ```powershell
 $env:MORAY_AIO_READONLY_ROOTS        = "C:\temp\demo-logs"
-$env:MORAY_AIO_LOG_PATH              = "C:\temp\demo-logs\moray.err.log"
+$env:MORAY_AIO_LOG_DIR               = "C:\temp\demo-logs"          # 滚动聚合模式
+$env:MORAY_AIO_LOG_GLOB_PATTERN      = "moray.err.log*"
 $env:MORAY_AIO_AUTO_APPROVE_READONLY = "false"   # 让 demo 展示审批环节
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8020
 python scripts\demo.py
 ```
+
+## v0.3.0：为接入 MoRay 做的三步升级
+
+**1. 异步 episode 执行**。`POST /episodes` 立即返回 `202 {"episode_id", "phase": "created"}`，
+内核丢进线程池后台执行（`MORAY_AIO_ASYNC_WORKERS` 控制并发），HTTP 不再被 LLM 阻塞；
+主项目用 `GET /episodes/{id}` 轮询状态即可。`POST /episodes/sync` 保留同步行为供调试。
+状态机新增 `queued`（created → queued → observing，与同步路径 created → observing 兼容）。
+SQLite 长效记忆加了连接级锁，HTTP 线程与后台线程并发安全。
+
+**2. 日志滚动聚合**。真实日志会滚动（`moray.err.log` / `.1` / 带日期后缀），单文件读取会漏数据。
+配置 `MORAY_AIO_LOG_DIR` + `MORAY_AIO_LOG_GLOB_PATTERN`（默认 `moray.err.log*`）后，
+`_observe` 按 mtime 新→旧聚合最多 5 个文件、合并为时间正序；未配置则回退单文件模式。
+工具层新增 `log_rolling_tail`（dir/pattern/n/max_files），同样受只读白名单与审批闸门约束。
+
+**3. 错误聚类**。`app/tools/clusterer.py` 把时间戳/IP/端口/UUID/十六进制串/数字归一化为
+`<TS>/<IP>/<PORT>/<UUID>/<HEX>/<NUM>` 占位符，同类错误折叠为一类（模板+次数+样本），
+只把 top N 类喂给 LLM——同类错误重复 1000 行不再浪费 token。聚类数上限
+`MORAY_AIO_CLUSTER_TOP_N`（默认 10）。
+
+## 版本
+
+- **v0.2.0**（tag）：MVP——Ollama 接入、自我迭代内核、批量审批、demo CLI。
+- **v0.3.0**（tag）：异步 episodes、日志滚动聚合、错误聚类，面向 MoRay 主项目 HTTP 接入就绪。
 
 ## Episode 生命周期
 

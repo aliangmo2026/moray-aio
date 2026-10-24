@@ -114,6 +114,7 @@ class OllamaClient:
             errors=_bullets(errors),
             extra=_bullets(extra),
             failed=_bullets(failed),
+            n_classes=len(list(errors or [])),
         )
         return self._generate(prompt, ANALYZE_SYSTEM)
 

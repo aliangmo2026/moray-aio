@@ -15,6 +15,7 @@ def _now() -> str:
 
 class Phase(str, Enum):
     CREATED = "created"
+    QUEUED = "queued"
     OBSERVING = "observing"
     ANALYZING = "analyzing"
     PROPOSING = "proposing"
@@ -24,9 +25,11 @@ class Phase(str, Enum):
     FAILED = "failed"
 
 
-# 显式合法转移表；表外转移一律非法（transition() 抛 ValueError）
+# 显式合法转移表；表外转移一律非法（transition() 抛 ValueError）。
+# created -> observing（同步路径）与 created -> queued -> observing（异步路径）都合法。
 ALLOWED: Dict[Phase, Set[Phase]] = {
-    Phase.CREATED: {Phase.OBSERVING, Phase.FAILED},
+    Phase.CREATED: {Phase.OBSERVING, Phase.QUEUED, Phase.FAILED},
+    Phase.QUEUED: {Phase.OBSERVING, Phase.FAILED},
     Phase.OBSERVING: {Phase.ANALYZING, Phase.FAILED},
     Phase.ANALYZING: {Phase.PROPOSING, Phase.CONCLUDED, Phase.FAILED},
     Phase.PROPOSING: {

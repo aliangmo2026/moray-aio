@@ -77,7 +77,7 @@ def test_health_includes_ollama_field(env):
 
 def test_approve_all_then_resume_concludes(env):
     client, _loop = env
-    ep = client.post("/episodes").json()
+    ep = client.post("/episodes/sync").json()
     assert ep["phase"] == "awaiting_approval"
     proposed = [t for t in ep["tasks"] if t["status"] == "proposed"]
     assert len(proposed) == 3  # 连接被拒/超时/文件缺失 → 启发式各提一条
@@ -94,7 +94,7 @@ def test_approve_all_then_resume_concludes(env):
 
 def test_reject_all_leads_to_conclusion_without_done(env):
     client, _loop = env
-    ep = client.post("/episodes").json()
+    ep = client.post("/episodes/sync").json()
     resp = client.post("/episodes/{}/tasks/reject-all".format(ep["id"]))
     assert resp.status_code == 200
     after = resp.json()
@@ -107,7 +107,7 @@ def test_reject_all_leads_to_conclusion_without_done(env):
 
 def test_approve_all_skips_nonreadonly_proposed(env):
     client, loop = env
-    ep = client.post("/episodes").json()
+    ep = client.post("/episodes/sync").json()
     # 混入一个非只读工具的 proposed 任务，验证批量审批不会批准它
     loop.require(ep["id"]).tasks.append(
         {
@@ -138,7 +138,7 @@ def test_approve_all_and_reject_all_unknown_episode_404(env):
 
 def test_memory_reflections_endpoint(env):
     client, _loop = env
-    ep = client.post("/episodes").json()
+    ep = client.post("/episodes/sync").json()
     client.post("/episodes/{}/tasks/reject-all".format(ep["id"]))
     client.post("/episodes/{}/resume".format(ep["id"]))
 
