@@ -128,6 +128,12 @@ def reject_all_tasks(episode_id: str):
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@router.get("/metrics")
+def metrics():
+    """全局统计（只读聚合）：episode 数/成功率/Token 消耗/平均耗时/任务分布。"""
+    return get_memory().metrics()
+
+
 @router.get("/memory/reflections")
 def list_reflections(limit: int = Query(default=5, ge=1, le=50)):
     """最近的反思/教训记录（长效记忆，只读查询）。"""

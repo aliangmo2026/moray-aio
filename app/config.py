@@ -33,7 +33,7 @@ class Settings:
     """只读配置。默认值面向 MoRay 主项目，可用 MORAY_AIO_* 环境变量覆盖。"""
 
     app_name: str = "moray-aio"
-    version: str = "0.4.0"
+    version: str = "0.5.0"
 
     # HTTP 服务
     host: str = field(default_factory=lambda: _env_str("MORAY_AIO_HOST", "127.0.0.1"))
@@ -101,6 +101,11 @@ class Settings:
         default_factory=lambda: _env_int("MORAY_AIO_PROBE_OUTPUT_MAX_BYTES", 4096)
     )
 
+    # 插件目录（分号分隔）：启动时扫描其中的 *.py，加载 BaseTool 子类为外部工具
+    plugin_dirs_raw: str = field(
+        default_factory=lambda: _env_str("MORAY_AIO_PLUGIN_DIRS", "")
+    )
+
     @property
     def readonly_roots(self) -> list:
         """白名单根目录列表；空片段忽略。"""
@@ -115,6 +120,11 @@ class Settings:
     def probe_host_whitelist(self) -> list:
         """探针可连主机白名单列表；空片段忽略。"""
         return [h.strip() for h in self.probe_host_whitelist_raw.split(";") if h.strip()]
+
+    @property
+    def plugin_dirs(self) -> list:
+        """插件目录列表；空片段忽略。"""
+        return [p.strip() for p in self.plugin_dirs_raw.split(";") if p.strip()]
 
 
 settings = Settings()

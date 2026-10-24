@@ -212,6 +212,65 @@ class Memory:
         scored.sort(key=lambda item: item["similarity"], reverse=True)
         return scored[: max(0, int(top_k))]
 
+    def metrics(self) -> dict:
+        """全局统计（只读聚合）：episode 数/成功率/Token 消耗/平均耗时/任务分布。"""
+        with self._lock:
+            rows = self._conn.execute("SELECT payload FROM episodes").fetchall()
+            n_reflections = self._conn.execute("SELECT COUNT(*) FROM reflections").fetchone()[0]
+        total = 0
+        concluded = 0
+        failed = 0
+        awaiting = 0
+        running = 0
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tasks = 0
+        tasks_by_status: Counter = Counter()
+        episode_durations = []
+        for (payload,) in rows:
+            try:
+                data = json.loads(payload)
+            except (TypeError, ValueError):
+                continue
+            total += 1
+            phase = data.get("phase")
+            if phase == "concluded":
+                concluded += 1
+            elif phase == "failed":
+                failed += 1
+            elif phase == "awaiting_approval":
+                awaiting += 1
+            else:
+                running += 1
+            duration = 0.0
+            for entry in data.get("trace") or []:
+                duration += float(entry.get("duration_ms") or 0)
+                usage = entry.get("llm") or {}
+                prompt_tokens += int(usage.get("prompt_tokens") or 0)
+                completion_tokens += int(usage.get("completion_tokens") or 0)
+            episode_durations.append(duration)
+            for task in data.get("tasks") or []:
+                total_tasks += 1
+                tasks_by_status[str(task.get("status") or "unknown")] += 1
+        avg_ms = (
+            round(sum(episode_durations) / len(episode_durations), 2) if episode_durations else 0.0
+        )
+        return {
+            "total_episodes": total,
+            "concluded": concluded,
+            "failed": failed,
+            "awaiting_approval": awaiting,
+            "in_progress": running,
+            "success_rate": round(concluded / total, 4) if total else 0.0,
+            "total_prompt_tokens": prompt_tokens,
+            "total_completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "avg_episode_duration_ms": avg_ms,
+            "total_tasks": total_tasks,
+            "tasks_by_status": dict(tasks_by_status),
+            "reflections": n_reflections,
+        }
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

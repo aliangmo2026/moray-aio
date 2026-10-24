@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -155,9 +156,31 @@ class EvolutionLoop:
 
     def _run(self, ep: Episode) -> None:
         ep.transition(Phase.OBSERVING)
-        self._observe(ep)
+        self._timed(ep, "observe", self._observe, ep)
         self.memory.save(ep)
         self._iterate(ep)
+
+    def _timed(self, ep: Episode, stage: str, fn, *args):
+        """核心阶段打点：记录 stage/iteration/phase/耗时/时间戳/LLM token 用量。"""
+        started = time.perf_counter()
+        result = fn(*args)
+        ep.trace.append(
+            {
+                "stage": stage,
+                "iteration": ep.iteration,
+                "phase": ep.phase.value,
+                "timestamp": _now(),
+                "duration_ms": round((time.perf_counter() - started) * 1000.0, 2),
+                "llm": self._take_usage(),
+            }
+        )
+        return result
+
+    def _take_usage(self) -> Optional[dict]:
+        if self.llm is None:
+            return None
+        take = getattr(self.llm, "take_last_usage", None)
+        return take() if callable(take) else None
 
     def _iterate(self, ep: Episode) -> None:
         """Analyze → Propose → (停在审批 | Execute → 回到 Analyze)；
@@ -166,10 +189,10 @@ class EvolutionLoop:
             ep.iteration += 1
             if ep.phase != Phase.ANALYZING:
                 ep.transition(Phase.ANALYZING)
-            self._analyze(ep)
+            self._timed(ep, "analyze", self._analyze, ep)
 
             ep.transition(Phase.PROPOSING)
-            new_tasks = self._propose(ep)
+            new_tasks = self._timed(ep, "propose", self._propose, ep)
             if any(t.get("status") == "proposed" for t in new_tasks):
                 ep.transition(Phase.AWAITING_APPROVAL)
                 self.memory.save(ep)
@@ -179,7 +202,7 @@ class EvolutionLoop:
                 break  # 无新任务且无 approved 可执行，本轮收敛
 
             ep.transition(Phase.EXECUTING)
-            self._execute_approved(ep)
+            self._timed(ep, "execute", self._execute_approved, ep)
 
         self._conclude(ep)
 

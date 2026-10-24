@@ -1,21 +1,26 @@
-"""只读工具注册表：路径白名单校验 + 按名分发。
+"""只读工具注册表：BaseTool 插件化注册 + 白名单校验 + 目录动态加载。
 
-任何工具调用涉及的 path/dir 参数都必须落在 readonly_roots 内，
-用 Path.resolve() + relative_to 校验，越界直接抛 PermissionError。
+所有工具都是只读的：注册表只负责「按名分发 + 白名单收敛」，
+任何工具的 path/dir/host 输入都必须先过校验，越界抛 PermissionError。
+外部插件目录由 MORAY_AIO_PLUGIN_DIRS（分号分隔）指定，
+每个 .py 文件在隔离命名空间中加载，坏插件只记录错误、不拖垮进程。
 """
 
 from __future__ import annotations
 
+import inspect
+import runpy
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Dict, List
 
 from app.tools import log_reader, probes
+from app.tools.plugin_base import BaseTool
 
 _DEFAULT_PROBE_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 class ToolRegistry:
-    """把「能读什么/能探什么」收敛到白名单之内。所有工具都是只读的。"""
+    """把「能读什么/能探什么」收敛到白名单之内。"""
 
     def __init__(
         self,
@@ -24,33 +29,106 @@ class ToolRegistry:
         probe_host_whitelist=None,
         probe_max_processes: int = 50,
         probe_output_max_bytes: int = 4096,
+        plugin_dirs=None,
     ):
         self.readonly_roots = [Path(r) for r in (readonly_roots or [])]
         self.max_scan_bytes = int(max_scan_bytes)
         self.probe_host_whitelist = tuple(probe_host_whitelist or _DEFAULT_PROBE_HOSTS)
         self.probe_max_processes = int(probe_max_processes)
         self.probe_output_max_bytes = int(probe_output_max_bytes)
-        self._tools: Dict[str, Callable[..., Any]] = {}
-        self._register_defaults()
+        self._tools: Dict[str, BaseTool] = {}
+        self.plugin_errors: List[str] = []
+        self._register_builtins()
+        dirs = [str(d) for d in (plugin_dirs or []) if str(d).strip()]
+        if dirs:
+            self.load_plugins(dirs)
 
     # ---- 注册 ----
 
-    def _register_defaults(self) -> None:
-        self.register("log_tail", self._tool_log_tail)
-        self.register("log_grep", self._tool_log_grep)
-        self.register("list_files", self._tool_list_files)
-        self.register("log_rolling_tail", self._tool_log_rolling_tail)
-        self.register("port_check", self._tool_port_check)
-        self.register("process_list", self._tool_process_list)
-        self.register("disk_usage", self._tool_disk_usage)
-        self.register("windows_service_status", self._tool_windows_service_status)
+    def register_tool(self, tool: BaseTool) -> None:
+        """动态注册一个工具实例；name 必须非空且唯一，risk_level 必须合法。"""
+        if not isinstance(tool, BaseTool):
+            raise TypeError("tool must be a BaseTool instance")
+        name = (getattr(tool, "name", "") or "").strip()
+        if not name:
+            raise ValueError("tool.name must be a non-empty string")
+        if getattr(tool, "risk_level", "") not in ("low", "medium", "high"):
+            raise ValueError("tool.risk_level must be low/medium/high: {!r}".format(name))
+        if name in self._tools:
+            raise ValueError("tool already registered: {!r}".format(name))
+        self._tools[name] = tool
 
-    def register(self, name: str, fn: Callable[..., Any]) -> None:
-        self._tools[name] = fn
+    def _register_builtins(self) -> None:
+        from app.tools.builtin.log_tools import (
+            LogGrepTool,
+            LogRollingTailTool,
+            LogTailTool,
+            ListFilesTool,
+        )
+        from app.tools.builtin.probe_tools import (
+            DiskUsageTool,
+            PortCheckTool,
+            ProcessListTool,
+            WindowsServiceStatusTool,
+        )
 
-    @property
-    def names(self) -> List[str]:
-        return sorted(self._tools)
+        for tool in (
+            LogTailTool(self),
+            LogGrepTool(self),
+            ListFilesTool(self),
+            LogRollingTailTool(self),
+            PortCheckTool(self),
+            ProcessListTool(self),
+            DiskUsageTool(self),
+            WindowsServiceStatusTool(self),
+        ):
+            self.register_tool(tool)
+
+    # ---- 目录动态加载（插件）----
+
+    def load_plugins(self, plugin_dirs) -> None:
+        """扫描目录下的 *.py（跳过 _ 开头），加载其中的 BaseTool 子类并注册。
+
+        每个文件独立 try/except：坏插件只进 plugin_errors，绝不影响进程与其他工具。
+        """
+        for raw_dir in plugin_dirs:
+            try:
+                directory = Path(str(raw_dir)).resolve()
+            except OSError:
+                self.plugin_errors.append("cannot resolve plugin dir: {}".format(raw_dir))
+                continue
+            if not directory.is_dir():
+                self.plugin_errors.append("plugin dir not found: {}".format(directory))
+                continue
+            for py_file in sorted(directory.glob("*.py")):
+                if py_file.name.startswith("_"):
+                    continue
+                self._load_plugin_file(py_file)
+
+    def _load_plugin_file(self, py_file: Path) -> None:
+        """在隔离命名空间中加载单个插件文件，注册其中定义的 BaseTool 子类。"""
+        try:
+            namespace = runpy.run_path(str(py_file))
+        except Exception as exc:
+            self.plugin_errors.append(
+                "failed loading {}: {}: {}".format(py_file.name, type(exc).__name__, exc)
+            )
+            return
+        loaded = 0
+        for obj in namespace.values():
+            if not (inspect.isclass(obj) and issubclass(obj, BaseTool) and obj is not BaseTool):
+                continue
+            try:
+                self.register_tool(obj())
+                loaded += 1
+            except Exception as exc:
+                self.plugin_errors.append(
+                    "failed registering from {}: {}: {}".format(
+                        py_file.name, type(exc).__name__, exc
+                    )
+                )
+        if loaded == 0:
+            self.plugin_errors.append("no BaseTool subclass found in {}".format(py_file.name))
 
     # ---- 白名单 ----
 
@@ -78,97 +156,22 @@ class ToolRegistry:
             )
         )
 
-    # ---- 工具实现 ----
-
-    def _tool_log_tail(self, path: str, n: int = 50, keyword: str = None) -> list:
-        checked = self._check_path(str(path))
-        return log_reader.tail(
-            checked, int(n), keyword=keyword, max_scan_bytes=self.max_scan_bytes
-        )
-
-    def _tool_log_grep(self, path: str, pattern: str, limit: int = 100) -> list:
-        checked = self._check_path(str(path))
-        return log_reader.grep(
-            checked, str(pattern), limit=int(limit), max_scan_bytes=self.max_scan_bytes
-        )
-
-    def _tool_list_files(self, dir: str = None) -> list:
-        target = str(dir) if dir else (str(self.readonly_roots[0]) if self.readonly_roots else "")
-        checked = self._check_path(target)
-        if not checked.is_dir():
-            raise NotADirectoryError("not a directory: {}".format(checked))
-        entries = []
-        for child in sorted(checked.iterdir(), key=lambda p: p.name):
-            if child.is_dir():
-                entries.append("dir\t{}".format(child.name))
-            else:
-                try:
-                    size = child.stat().st_size
-                except OSError:
-                    size = -1
-                entries.append("file\t{}\t{}".format(child.name, size))
-        return entries
-
-    def _tool_log_rolling_tail(
-        self, dir: str, pattern: str = "moray.err.log*", n: int = 50, max_files: int = 5
-    ) -> list:
-        """滚动日志聚合尾部：dir 必须在白名单内，pattern 为 glob（如 moray.err.log*）。"""
-        checked = self._check_path(str(dir))
-        return log_reader.read_rolling(
-            checked,
-            str(pattern or "moray.err.log*"),
-            int(n),
-            max_files=int(max_files),
-            max_scan_bytes=self.max_scan_bytes,
-        )
-
-    # ---- 只读系统探针（观察，不修改）----
-
     def check_probe_host(self, host: str) -> None:
         """探针主机白名单校验入口（供 planner 预检与工具实现共用）。"""
         probes.check_host_allowed(host, self.probe_host_whitelist)
 
-    def _tool_port_check(self, host: str, port: int, timeout: float = 2) -> dict:
-        return probes.port_check(
-            str(host), port, timeout=timeout, host_whitelist=self.probe_host_whitelist
-        )
-
-    def _tool_process_list(self, name_pattern: str = None) -> dict:
-        return probes.process_list(
-            name_pattern=name_pattern, max_processes=self.probe_max_processes
-        )
-
-    def _tool_disk_usage(self, path: str) -> dict:
-        checked = self._check_path(str(path))
-        return probes.disk_usage(str(checked))
-
-    def _tool_windows_service_status(self, service_name: str) -> dict:
-        return probes.windows_service_status(
-            service_name, output_max_bytes=self.probe_output_max_bytes
-        )
-
     # ---- 分发 ----
 
+    @property
+    def names(self) -> List[str]:
+        return sorted(self._tools)
+
     def call(self, name: str, params: dict = None) -> Any:
-        fn = self._tools.get(name)
-        if fn is None:
-            raise ValueError(
-                "unknown tool: {!r}; available: {}".format(name, self.names)
-            )
-        return fn(**dict(params or {}))
+        tool = self._tools.get(name)
+        if tool is None:
+            raise ValueError("unknown tool: {!r}; available: {}".format(name, self.names))
+        return tool.invoke(dict(params or {}))
 
     def describe(self) -> str:
-        """给 LLM 的工具清单（只含白名单内工具与参数说明）。"""
-        default_dir = str(self.readonly_roots[0]) if self.readonly_roots else "(未配置)"
-        return "\n".join(
-            [
-                "- log_tail(path: str, n: int = 50, keyword: str = null) -> 日志尾部 n 行（时间正序，可按关键词过滤）",
-                "- log_grep(path: str, pattern: str, limit: int = 100) -> 尾部正则匹配的日志行（时间正序）",
-                "- list_files(dir: str) -> 列出目录内容（默认: {}）".format(default_dir),
-                '- log_rolling_tail(dir: str, pattern: str = "moray.err.log*", n: int = 50, max_files: int = 5) -> 跨滚动日志文件聚合的尾部行（时间正序）',
-                "- port_check(host: str, port: int, timeout: float = 2) -> [只读探针] 探测端口可连性，返回 open/latency_ms",
-                "- process_list(name_pattern: str = null) -> [只读探针] 列出进程（pid/name/内存等，最多 50 条）",
-                "- disk_usage(path: str) -> [只读探针] 查询磁盘占用（path 需在白名单内）",
-                "- windows_service_status(service_name: str) -> [只读探针] 查询 Windows 服务状态（只读查询，绝不启停）",
-            ]
-        )
+        """给 LLM 的工具清单（只含已注册工具；插件工具自动出现在末尾）。"""
+        return "\n".join(self._tools[name].help_line() for name in self.names)

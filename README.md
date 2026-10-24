@@ -41,14 +41,21 @@ E:\moray-aio\
 │   │   ├── approval.py     # 审批闸门（classify/decide）
 │   │   ├── planner.py      # 自驱任务生成（LLM 优先 / 启发式兜底）
 │   │   └── loop.py         # 主循环 Observe→Analyze→Propose→(审批)→Execute
-│   ├── tools\              # 只读工具集
+│   ├── tools\              # 只读工具集（全部插件化）
+│   │   ├── plugin_base.py  # BaseTool 插件基类（name/description/risk_level/params_schema/invoke）
+│   │   ├── builtin\        # 内置工具：log_tools.py（4 个日志工具）+ probe_tools.py（4 个探针）
 │   │   ├── log_reader.py   # tail/recent_errors/grep/read_rolling/check_readable（"rb" 只读）
 │   │   ├── clusterer.py    # 错误聚类：normalize + cluster（模板折叠省 token）
-│   │   ├── probes.py       # 只读系统探针：port_check/process_list/disk_usage/windows_service_status
-│   │   └── registry.py     # ToolRegistry：白名单校验 + 分发
+│   │   ├── probes.py       # 只读系统探针实现（port/process/disk/service）
+│   │   └── registry.py     # ToolRegistry：白名单校验 + 插件注册/目录动态加载
 │   └── llm\
 │       ├── prompts.py      # ANALYZE_*/PLAN_*（只读、白名单、严格 JSON）
-│       └── ollama_client.py# /api/generate，format=json，不可用自动兜底
+│       └── ollama_client.py# /api/generate，token 用量统计，不可用自动兜底
+├── examples\
+│   └── dummy_echo_plugin.py  # 示例插件（MORAY_AIO_PLUGIN_DIRS=examples 即可加载）
+├── cli.py                  # 命令行入口：serve / run / health（纯 ANSI）
+├── Dockerfile              # python:3.10-slim，非 root，最小镜像
+├── docker-compose.yml      # 一键启动（日志只读挂载）
 ├── scripts\backup.ps1      # 把目标文件复制到 .backup\<时间戳>-<文件名>，不改原文件
 └── tests\                  # pytest
 ```
@@ -64,11 +71,16 @@ pip install -r requirements-dev.txt
 # 跑测试
 pytest -q
 
+# 命令行直接体验（无需起服务）
+python cli.py run --trigger recent_errors --auto-approve
+python cli.py health
+
 # 拉取本地模型（Ollama 不可用时服务自动走启发式兜底，不阻塞启动）
 ollama pull qwen2.5:7b
 
 # 起服务
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8020
+# 或 python cli.py serve
 ```
 
 配置全部可用环境变量覆盖（见 `.env.example`）。默认目标日志是
@@ -86,7 +98,8 @@ $env:MORAY_AIO_LOG_PATH       = "C:\temp\demo-logs\moray.err.log"
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/health` | 健康检查；`log` 字段为目标日志的只读探测（exists/readable/size_bytes） |
+| GET | `/health` | 健康检查；`log` 字段为目标日志的只读探测（exists/readable/size_bytes），`ollama` 为模型可用性 |
+| GET | `/metrics` | 全局统计：episode 数/成功率/Token 消耗/平均耗时/任务分布 |
 | GET | `/logs/recent-errors?limit=10` | 最近 N 条 ERROR（时间正序）；文件不存在 404，白名单外 403 |
 | POST | `/episodes?trigger=recent_errors` | **异步**启动迭代：202 + `{episode_id, phase:"created"}`，后台执行，轮询下一条接口 |
 | POST | `/episodes/sync` | 同步启动（调试用）：阻塞到终态/审批点，返回完整 episode |
@@ -175,11 +188,41 @@ port_check + process_list（端口→服务名推测表：6379→redis、5432→
 探针执行结果以 `kind=probe` 记入 observations（进程列表注入 LLM 前会摘要为
 count + 前 3 个名字，防止撑爆上下文）。
 
+## Docker 一键启动
+
+```powershell
+docker compose up --build
+# 服务: http://127.0.0.1:8020 ；日志目录 ./logs 只读挂载到容器 /logs
+```
+
+镜像基于 python:3.10-slim、非 root 用户运行；compose 只把端口绑到本机回环。
+
+## v0.5.0：可观测性 + 插件化 + CLI + 容器化
+
+**1. Trace & Metrics**。Episode 新增 `trace` 字段：observe/analyze/propose/execute 四个
+核心阶段逐一打点（阶段、迭代号、耗时 duration_ms、时间戳、LLM token 用量）。
+Ollama 返回的 `prompt_eval_count`/`eval_count` 会被统计进对应阶段（线程隔离，避免并发串扰）。
+`GET /episodes/{id}` 返回完整 trace；`GET /metrics` 给出全局统计（episode 数、成功率、
+总 token、平均耗时、任务状态分布）。
+
+**2. 插件化工具架构**。`app/tools/plugin_base.py` 定义 `BaseTool`（name/description/
+risk_level/params_schema + `invoke(params)` 单字典入口）；8 个内置工具全部重构为
+`app/tools/builtin/` 下的 BaseTool 实现；`ToolRegistry.register_tool()` 支持动态注册，
+`MORAY_AIO_PLUGIN_DIRS`（分号分隔目录）启动时自动扫描加载 `*.py` 中的 BaseTool 子类，
+坏插件只记录到 `plugin_errors`、绝不拖垮进程。示例见 `examples/dummy_echo_plugin.py`。
+
+**3. CLI**。`python cli.py serve|run|health`：run 不经 HTTP 直接跑完整分析并在终端
+彩色输出 trace/任务/结论（纯 ANSI，NO_COLOR=1 可关）；health 检查服务状态。
+
+**4. Docker**。Dockerfile（python:3.10-slim、非 root、依赖层缓存）+ docker-compose.yml
+（日志目录只读挂载、端口只绑 127.0.0.1）。
+
 ## 版本
 
 - **v0.2.0**（tag）：MVP——Ollama 接入、自我迭代内核、批量审批、demo CLI。
 - **v0.3.0**（tag）：异步 episodes、日志滚动聚合、错误聚类，面向 MoRay 主项目 HTTP 接入就绪。
 - **v0.4.0**（tag）：只读系统探针、planner 智能派发、历史相似案例检索。
+- **v0.5.0**（tag）：trace/metrics 可观测性、BaseTool 插件化、CLI、Docker。
 
 ## Episode 生命周期
 

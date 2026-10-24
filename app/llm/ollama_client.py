@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from typing import FrozenSet, List, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -65,6 +66,8 @@ class OllamaClient:
         self.model = model
         self.timeout = int(timeout)
         self._available: Optional[bool] = None
+        # Token 用量按线程隔离：后台线程池并发跑 episode，避免互相覆盖
+        self._tls = threading.local()
 
     def is_available(self) -> bool:
         """探测 /api/tags；成功才缓存 True，失败不缓存、下次再试。"""
@@ -91,7 +94,17 @@ class OllamaClient:
         resp = httpx.post(self._origin + _GENERATE_PATH, json=payload, timeout=self.timeout)
         resp.raise_for_status()
         body = resp.json()
+        self._tls.last_usage = {
+            "prompt_tokens": _as_int(body.get("prompt_eval_count")),
+            "completion_tokens": _as_int(body.get("eval_count")),
+        }
         return self._parse_json(body.get("response", ""))
+
+    def take_last_usage(self) -> Optional[dict]:
+        """取走并清空本线程最近一次生成的 token 用量（供 trace 打点归因）。"""
+        usage = getattr(self._tls, "last_usage", None)
+        self._tls.last_usage = None
+        return usage
 
     @staticmethod
     def _parse_json(raw: str) -> dict:
@@ -145,3 +158,10 @@ def _bullets(items) -> str:
     if not items:
         return "(无)"
     return "\n".join("- {}".format(item) for item in items)
+
+
+def _as_int(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0

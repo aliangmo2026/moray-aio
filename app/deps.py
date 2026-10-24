@@ -19,13 +19,14 @@ def get_memory() -> Memory:
 
 @lru_cache(maxsize=1)
 def get_tools() -> ToolRegistry:
-    """只读工具注册表（日志白名单 + 探针白名单均来自 settings）。"""
+    """只读工具注册表（内置工具 + MORAY_AIO_PLUGIN_DIRS 目录插件）。"""
     return ToolRegistry(
         settings.readonly_roots,
         settings.max_scan_bytes,
         probe_host_whitelist=settings.probe_host_whitelist,
         probe_max_processes=settings.probe_max_processes,
         probe_output_max_bytes=settings.probe_output_max_bytes,
+        plugin_dirs=settings.plugin_dirs,
     )
 
 

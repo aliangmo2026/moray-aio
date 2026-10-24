@@ -58,6 +58,8 @@ class Episode:
     tasks: List[dict] = field(default_factory=list)
     conclusion: Optional[str] = None
     error: Optional[str] = None
+    # 底层追踪：每个核心阶段一条 {stage, iteration, phase, timestamp, duration_ms, llm}
+    trace: List[dict] = field(default_factory=list)
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
 
@@ -87,6 +89,7 @@ class Episode:
             "tasks": self.tasks,
             "conclusion": self.conclusion,
             "error": self.error,
+            "trace": self.trace,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

@@ -1,0 +1,25 @@
+services:
+  moray-aio:
+    build: .
+    image: moray-aio:0.5.0
+    ports:
+      - "127.0.0.1:8020:8020"   # 只绑本机回环，避免直接暴露公网
+    environment:
+      MORAY_AIO_HOST: "0.0.0.0"
+      MORAY_AIO_PORT: "8020"
+      # 只读日志目录（容器内路径）
+      MORAY_AIO_LOG_PATH: /logs/moray.err.log
+      MORAY_AIO_READONLY_ROOTS: /logs
+      MORAY_AIO_LOG_DIR: /logs
+      MORAY_AIO_LOG_GLOB_PATTERN: "moray.err.log*"
+      # Ollama 地址：Linux 上用 host-gateway 映射宿主机；Docker Desktop 自带该域名
+      MORAY_AIO_OLLAMA_URL: http://host.docker.internal:11434
+      MORAY_AIO_OLLAMA_ALLOWED_HOSTS: "127.0.0.1;localhost;::1;host.docker.internal"
+      MORAY_AIO_MEMORY_DB_PATH: /app/data/memory.sqlite3
+    volumes:
+      # 日志只读挂载：引擎绝不写日志
+      - ./logs:/logs:ro
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
