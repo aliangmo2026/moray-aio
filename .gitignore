@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# 运行时数据
+data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.backup/
+
+# 本地配置
+.env
+
+# 编辑器
+.vscode/
+.idea/
