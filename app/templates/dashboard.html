@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>moray-aio | console</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<style>
+  [x-cloak] { display: none; }
+  .num { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body class="bg-gray-900 text-gray-200 min-h-screen" x-data="dashboard()" x-init="load()">
+
+<header class="border-b border-gray-800 px-6 py-3 flex items-center justify-between">
+  <div class="flex items-center gap-3">
+    <span class="text-green-400 font-bold text-lg tracking-tight">moray-aio</span>
+    <span class="text-gray-500 text-xs num">v1.0.0 / read-only AIOps agent</span>
+  </div>
+  <div class="flex items-center gap-2 text-xs">
+    <span class="text-gray-500 num" x-text="data.server_time || '-'"></span>
+    <button @click="load()" class="px-2 py-1 border border-gray-700 text-gray-400 hover:text-green-400 hover:border-green-700">refresh</button>
+  </div>
+</header>
+
+<!-- 顶部指标卡 -->
+<section class="grid grid-cols-2 md:grid-cols-4 gap-px bg-gray-800 border-b border-gray-800">
+  <div class="bg-gray-900 px-6 py-4">
+    <div class="text-gray-500 text-xs uppercase tracking-widest">episodes</div>
+    <div class="text-2xl num text-white" x-text="m.total_episodes ?? '-'"></div>
+    <div class="text-xs text-gray-600 num">concluded <span x-text="m.concluded ?? 0"></span> / failed <span x-text="m.failed ?? 0"></span></div>
+  </div>
+  <div class="bg-gray-900 px-6 py-4">
+    <div class="text-gray-500 text-xs uppercase tracking-widest">success rate</div>
+    <div class="text-2xl num" :class="rateClass" x-text="rateText"></div>
+    <div class="text-xs text-gray-600 num">tasks <span x-text="m.total_tasks ?? 0"></span></div>
+  </div>
+  <div class="bg-gray-900 px-6 py-4">
+    <div class="text-gray-500 text-xs uppercase tracking-widest">tokens</div>
+    <div class="text-2xl num text-white" x-text="fmt(m.total_tokens)"></div>
+    <div class="text-xs text-gray-600 num">prompt <span x-text="fmt(m.total_prompt_tokens)"></span> / completion <span x-text="fmt(m.total_completion_tokens)"></span></div>
+  </div>
+  <div class="bg-gray-900 px-6 py-4">
+    <div class="text-gray-500 text-xs uppercase tracking-widest">watch</div>
+    <div class="flex items-center gap-2">
+      <span class="h-3 w-3 rounded-full" :class="watch.running ? 'bg-green-400 animate-pulse' : 'bg-gray-600'"></span>
+      <span class="text-lg num" :class="watch.running ? 'text-green-400' : 'text-gray-500'" x-text="watch.running ? 'RUNNING' : 'STOPPED'"></span>
+    </div>
+    <div class="text-xs text-gray-600 num">alerts <span x-text="watch.notifications_sent ?? 0"></span> · pending <span x-text="watch.pending_episodes ?? 0"></span></div>
+  </div>
+</section>
+
+<!-- 主体：左 Episode 列表 / 右 Trace 瀑布 -->
+<main class="grid grid-cols-1 lg:grid-cols-5 gap-px bg-gray-800">
+
+  <section class="bg-gray-900 lg:col-span-2 max-h-[75vh] overflow-y-auto">
+    <div class="px-4 py-2 text-xs uppercase tracking-widest text-gray-500 border-b border-gray-800 sticky top-0 bg-gray-900">
+      episodes <span class="text-gray-600" x-text="'(' + (data.episodes||[]).length + ')'"></span>
+    </div>
+    <template x-for="ep in (data.episodes || [])" :key="ep.id">
+      <button @click="select(ep)" class="w-full text-left px-4 py-2 border-b border-gray-800/60 hover:bg-gray-800"
+              :class="current && current.id === ep.id ? 'bg-gray-800 border-l-2 border-l-green-400' : ''">
+        <div class="flex items-center justify-between">
+          <span class="num text-xs text-gray-500" x-text="ep.id.slice(0, 8)"></span>
+          <span class="text-xs px-1.5 py-0.5 num" :class="phaseClass(ep.phase)" x-text="ep.phase"></span>
+        </div>
+        <div class="text-xs text-gray-400 truncate" x-text="ep.trigger"></div>
+        <div class="text-xs text-gray-600 num">
+          iter <span x-text="ep.iteration"></span> · tasks <span x-text="(ep.tasks||[]).length"></span> ·
+          <span x-text="(ep.created_at||'').slice(11,19)"></span>
+        </div>
+      </button>
+    </template>
+    <div x-show="!(data.episodes||[]).length" class="px-4 py-8 text-center text-gray-600 text-sm">no episodes yet</div>
+  </section>
+
+  <section class="bg-gray-900 lg:col-span-3 max-h-[75vh] overflow-y-auto">
+    <div class="px-4 py-2 text-xs uppercase tracking-widest text-gray-500 border-b border-gray-800 sticky top-0 bg-gray-900">
+      trace waterfall
+      <span class="text-gray-600 num" x-text="current ? ' / ' + current.id.slice(0,8) : ''"></span>
+    </div>
+
+    <div x-show="!current" class="px-4 py-8 text-center text-gray-600 text-sm">← 选择一个 episode 查看 trace</div>
+
+    <div x-show="current" x-cloak class="p-4 space-y-2">
+      <template x-for="(entry, i) in (current ? current.trace : [])" :key="i">
+        <div class="flex items-center gap-2">
+          <div class="w-24 text-xs num text-right"
+               :class="entry.stage === 'circuit_break' ? 'text-red-400' : 'text-gray-400'"
+               x-text="entry.stage + ' #' + entry.iteration"></div>
+          <div class="flex-1 h-6 bg-gray-800 relative">
+            <div class="h-6 flex items-center px-2 text-xs num"
+                 :class="barClass(entry)"
+                 :style="'width:' + barWidth(entry) + '%'">
+              <span x-text="entry.duration_ms + ' ms'"></span>
+            </div>
+          </div>
+          <div class="w-52 text-xs num text-gray-500">
+            <template x-if="entry.llm">
+              <span class="text-amber-300"
+                    x-text="entry.llm.prompt_tokens + ' prompt / ' + entry.llm.completion_tokens + ' completion' + (entry.llm.retries ? ' · retry ' + entry.llm.retries : '')"></span>
+            </template>
+            <template x-if="entry.stage === 'circuit_break'">
+              <span class="text-red-400" x-text="'BUDGET ' + (entry.detail ? entry.detail.used_tokens + '/' + entry.detail.max_tokens : '')"></span>
+            </template>
+          </div>
+        </div>
+      </template>
+
+      <div x-show="current && current.error" class="mt-3 p-2 border border-red-900 bg-red-950/40 text-red-300 text-xs num" x-text="current ? current.error : ''"></div>
+      <div x-show="current && current.conclusion" class="mt-3 p-2 border border-gray-800 bg-gray-800/40 text-gray-300 text-xs leading-relaxed">
+        <span class="text-gray-500 uppercase tracking-widest text-xs">conclusion</span><br>
+        <span x-text="current ? current.conclusion : ''"></span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="px-6 py-2 text-xs text-gray-700 num border-t border-gray-800">
+  read-only AIOps agent · data refresh on demand · api:
+  <span class="text-gray-600">/api/dashboard/data</span>
+</footer>
+
+<script>
+function dashboard() {
+  return {
+    data: { episodes: [] },
+    current: null,
+    get m() { return this.data.metrics || {}; },
+    get watch() { return this.data.watch || {}; },
+    get rateText() {
+      const r = this.m.success_rate;
+      return r == null ? '-' : (r * 100).toFixed(1) + '%';
+    },
+    get rateClass() {
+      const r = this.m.success_rate ?? 0;
+      return r >= 0.8 ? 'text-green-400' : (r >= 0.5 ? 'text-amber-300' : 'text-red-400');
+    },
+    fmt(n) {
+      if (n == null) return '-';
+      return n >= 10000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+    },
+    phaseClass(phase) {
+      return {
+        concluded: 'bg-green-900/60 text-green-300',
+        failed: 'bg-red-900/60 text-red-300',
+        awaiting_approval: 'bg-amber-900/60 text-amber-300',
+      }[phase] || 'bg-gray-800 text-gray-400';
+    },
+    barClass(entry) {
+      if (entry.stage === 'circuit_break') return 'bg-red-700 text-red-100';
+      return {
+        observe: 'bg-sky-800 text-sky-100',
+        analyze: 'bg-indigo-700 text-indigo-100',
+        propose: 'bg-teal-700 text-teal-100',
+        execute: 'bg-gray-700 text-gray-100',
+      }[entry.stage] || 'bg-gray-700 text-gray-100';
+    },
+    barWidth(entry) {
+      const trace = (this.current && this.current.trace) || [];
+      const max = Math.max(1, ...trace.map(e => e.duration_ms || 0));
+      return Math.max(6, ((entry.duration_ms || 0) / max) * 100);
+    },
+    select(ep) { this.current = ep; },
+    async load() {
+      const key = new URLSearchParams(location.search).get('api_key') || '';
+      const headers = key ? { 'X-API-Key': key } : {};
+      try {
+        const resp = await fetch('/api/dashboard/data', { headers });
+        if (!resp.ok) return;
+        this.data = await resp.json();
+        if (!this.current && (this.data.episodes || []).length) this.current = this.data.episodes[0];
+      } catch (e) { /* 保活：忽略网络抖动 */ }
+    },
+  };
+}
+</script>
+</body>
+</html>

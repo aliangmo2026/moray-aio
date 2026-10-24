@@ -15,12 +15,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY cli.py .
 
-# 非 root 用户 + 数据/日志挂载点
-RUN useradd --create-home --shell /usr/sbin/nologin moray \
+# 非 root 用户（aio）+ 数据/日志挂载点
+RUN useradd -m --shell /usr/sbin/nologin aio \
     && mkdir -p /app/data /logs \
-    && chown -R moray:moray /app /logs
+    && chown -R aio:aio /app /logs
 
-USER moray
+USER aio
 
 VOLUME ["/app/data", "/logs"]
 EXPOSE 8020

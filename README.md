@@ -1,7 +1,12 @@
 # moray-aio
 
+![Build Passing](https://img.shields.io/badge/build-passing-brightgreen)
+![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
+![Docker ready](https://img.shields.io/badge/docker-ready-blue)
+![License MIT](https://img.shields.io/badge/license-MIT-green)
+
 基于本地大模型（Ollama）的 **AIOps 智能运维 Agent**，定位是「**只读分析、辅助决策**」。
-本仓库是独立引擎（MVP，v0.2.0），未来通过 HTTP 接入主项目 MoRay；本项目**不引用、不修改** MoRay 的任何代码。
+事件驱动：主动监听日志 → 规则触发 → 自驱分析 → Webhook 告警；独立引擎通过 HTTP 供外部系统接入。
 
 ## 核心能力（本阶段 MVP）
 
@@ -267,6 +272,61 @@ episode 终态推送结论（concluded）或错误（failed）。`MORAY_AIO_WATC
 服务启动即监听（默认关闭）；`POST /watch/start|stop`、`GET /watch/status` 手动控制；
 `python cli.py watch --log-path <path>` 直接在终端跑（Ctrl+C 优雅退出）。
 
+## 架构（Event-driven）
+
+```mermaid
+flowchart TD
+    W[EventWatcher<br/>os.stat 轮询日志] --> T[TriggerEngine<br/>burst / keyword / spike + 冷却]
+    T -->|watch:rule| L[EvolutionLoop<br/>Observe → Analyze → Propose → Execute]
+    L --> P[只读工具/探针<br/>log_reader / probes / plugins]
+    L --> LLM[Ollama LLM<br/>Token 熔断 + 重试退避]
+    L -->|concluded / failed| N[Notifier<br/>Console / Webhook / File]
+    L --> R[(Repository<br/>SQLite / Postgres)]
+    D[Dashboard<br/>/dashboard] --> L
+    D --> T
+```
+
+**Episode 生命周期**：`created → queued → observing → analyzing → proposing →
+(awaiting_approval ⇄) executing → analyzing → … → concluded`，异常/熔断进入 `failed`。
+任务状态：`proposed → approved/rejected → done/failed/empty`（empty 会反馈给下一轮规划纠错）。
+
+## 可视化控制台（Dashboard）
+
+`GET /dashboard` 打开单页控制台（Alpine.js + Tailwind CDN，零构建依赖）：
+暗色高密度布局，顶部指标卡（episodes / success rate / tokens / watch 呼吸灯），
+左侧 Episode 列表，右侧 **Trace 瀑布图**（observe/analyze/propose/execute 耗时横条、
+token 标注 `1115 prompt / 393 completion`、`circuit_break` 红色高亮）。
+数据来自 `GET /api/dashboard/data`（metrics + 最近 20 个 episode + watch 状态）；
+配置了 API Key 时用 `http://127.0.0.1:8020/dashboard?api_key=...` 访问（前端自动带 header）。
+
+## Safety by Design
+
+1. **只读日志**：日志只以 `open(path, "rb")` 打开；绝不写、截断、重命名、删除被监控文件。
+2. **路径白名单**：工具输入经 `Path.resolve() + relative_to` 校验，越界抛 `PermissionError`（含 `..` 穿越）。
+3. **绝不执行危险命令**：kill/reboot/restart/shutdown/rm/del/format 只能作为「建议：…」文本出现。
+4. **审批闸门**：非只读工具直接拒绝；高危 token 永远 `pending` 等人工。
+5. **Token 预算熔断**：单 episode LLM 用量超限立即 `FAILED` + `circuit_break` trace。
+6. **出站请求纪律**：URL 仅 http/https + host 白名单；Webhook 拒环回/私有/保留地址、防 DNS rebinding、禁重定向。
+7. **凭据纪律**：密钥只从环境变量读取；源码/示例/测试零凭据字面量。
+8. **SQL 全参数绑定**；探针只读（psutil 枚举/sc query），subprocess 一律 list + shell=False。
+
+## 性能（100MB 日志实测）
+
+| 项目 | 指标 |
+| --- | --- |
+| read_rolling 全量扫描 | 144.5 万行 / 16.6s / 6.1 MB/s |
+| cluster 聚类 | 144.5 万行 → 4 类 / 21,259 lines/s |
+| 并发启发式分析 | 20 workers → **269.6 QPS**（无 LLM 内核全链路） |
+
+完整报告见 [docs/benchmark.md](docs/benchmark.md)（`python scripts/benchmark.py` 可复现）。
+
+## 插件：自定义只读探针
+
+`examples/` 提供两个插件示例：`dummy_echo_plugin.py`（最小回显）与
+`k8s_pod_check_plugin.py`（K8s Pod 检查 Mock，演示「系统探针类」插件写法——
+真实实现建议只读 `kubectl get pods` / K8s API GET）。设置
+`MORAY_AIO_PLUGIN_DIRS=examples` 即可加载，工具自动出现在 planner/LLM 可选清单。
+
 ## 版本
 
 - **v0.2.0**（tag）：MVP——Ollama 接入、自我迭代内核、批量审批、demo CLI。
@@ -275,6 +335,7 @@ episode 终态推送结论（concluded）或错误（failed）。`MORAY_AIO_WATC
 - **v0.5.0**（tag）：trace/metrics 可观测性、BaseTool 插件化、CLI、Docker。
 - **v0.6.0**（tag）：Repository 抽象（SQLite/Postgres）、Token 熔断、API 鉴权、网络重试。
 - **v0.7.0**（tag）：事件驱动 Watch——日志监听、触发规则、Webhook 告警、自驱分析闭环。
+- **v1.0.0**（tag）：正式版——可视化控制台、压测报告、CI/LICENSE/CONTRIBUTING 开源基建、Docker 闭环。
 
 ## Episode 生命周期
 

@@ -33,7 +33,7 @@ class Settings:
     """只读配置。默认值面向 MoRay 主项目，可用 MORAY_AIO_* 环境变量覆盖。"""
 
     app_name: str = "moray-aio"
-    version: str = "0.7.0"
+    version: str = "1.0.0"
 
     # HTTP 服务
     host: str = field(default_factory=lambda: _env_str("MORAY_AIO_HOST", "127.0.0.1"))

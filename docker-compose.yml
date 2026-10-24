@@ -1,13 +1,13 @@
 services:
   moray-aio:
     build: .
-    image: moray-aio:0.5.0
+    image: moray-aio:1.0.0
     ports:
       - "127.0.0.1:8020:8020"   # 只绑本机回环，避免直接暴露公网
     environment:
       MORAY_AIO_HOST: "0.0.0.0"
       MORAY_AIO_PORT: "8020"
-      # 只读日志目录（容器内路径）
+      # 只读日志目录（容器内路径；宿主机侧由下方挂载提供）
       MORAY_AIO_LOG_PATH: /logs/moray.err.log
       MORAY_AIO_READONLY_ROOTS: /logs
       MORAY_AIO_LOG_DIR: /logs
@@ -16,9 +16,13 @@ services:
       MORAY_AIO_OLLAMA_URL: http://host.docker.internal:11434
       MORAY_AIO_OLLAMA_ALLOWED_HOSTS: "127.0.0.1;localhost;::1;host.docker.internal"
       MORAY_AIO_MEMORY_DB_PATH: /app/data/memory.sqlite3
+      # API 鉴权（默认开启演示）：密钥从宿主机环境变量/同目录 .env 读取，
+      # 绝不写入凭据字面量。示例 .env: MORAY_AIO_API_KEY=<你的演示密钥>
+      MORAY_AIO_API_KEY: ${MORAY_AIO_API_KEY:-}
     volumes:
-      # 日志只读挂载：引擎绝不写日志
-      - ./logs:/logs:ro
+      # 被监控日志只读挂载（引擎绝不写日志）：默认挂 MoRay 日志目录 D:\MoRay\logs，
+      # 其他机器用 MORAY_AIO_LOGS_DIR 覆盖（例：./logs）
+      - ${MORAY_AIO_LOGS_DIR:-D:/MoRay/logs}:/logs:ro
       - ./data:/app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"

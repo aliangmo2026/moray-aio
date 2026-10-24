@@ -19,6 +19,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.api.routes import router
+from app.api.dashboard import dashboard_router
 from app.config import Settings, settings
 
 logger = logging.getLogger("moray_aio.main")
@@ -30,7 +31,10 @@ def _install_auth_middleware(application: FastAPI, api_key: str) -> None:
     @application.middleware("http")
     async def api_key_middleware(request: Request, call_next):
         if request.url.path != "/health":
-            provided = request.headers.get(API_KEY_HEADER, "")
+            # 支持 Header 或 URL 传参（?api_key=...，浏览器加载 /dashboard 用）
+            provided = request.headers.get(API_KEY_HEADER, "") or request.query_params.get(
+                "api_key", ""
+            )
             if not hmac.compare_digest(
                 provided.encode("utf-8"), api_key.encode("utf-8")
             ):
@@ -71,6 +75,7 @@ def create_app(config: Settings = None) -> FastAPI:
     if cfg.api_key:
         _install_auth_middleware(application, cfg.api_key)
     application.include_router(router)
+    application.include_router(dashboard_router)
     return application
 
 
