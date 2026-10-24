@@ -56,7 +56,10 @@ def test_loop_heuristic_concludes_with_auto_approve(tmp_path):
 
     # 启发式规划器命中 Connection refused → 生成 log_grep 侦查任务
     assert any(t["tool"] == "log_grep" for t in ep.tasks)
-    assert all(t["status"] in ("proposed", "approved", "done", "failed", "rejected") for t in ep.tasks)
+    assert all(
+        t["status"] in ("proposed", "approved", "done", "failed", "rejected", "empty")
+        for t in ep.tasks
+    )
 
     # 自动批准路径下收敛为 concluded，且至少有一条任务结果回填进 observations
     assert ep.phase == Phase.CONCLUDED
@@ -171,3 +174,80 @@ def test_log_path_outside_whitelist_fails(tmp_path):
     ep = loop.start()
     assert ep.phase == Phase.FAILED
     assert "PermissionError" in ep.error
+
+
+class _ScriptedLLM:
+    """捕获上下文的假 LLM：第一轮给出一个必然空结果的 pattern，之后不再提任务。"""
+
+    def __init__(self, pattern):
+        self.pattern = pattern
+        self.analyze_calls = []
+        self.plan_calls = []
+
+    def is_available(self):
+        return True
+
+    def analyze(self, errors, extra=None, lessons=None, failed=None):
+        self.analyze_calls.append({"errors": list(errors), "failed": failed})
+        return {
+            "summary": "scripted",
+            "likely_root_causes": [],
+            "information_gaps": [],
+            "conclusion": "scripted conclusion",
+        }
+
+    def plan_tasks(self, errors, log_path, tools, existing=None, lessons=None, failed=None):
+        self.plan_calls.append({"failed": failed, "existing": existing})
+        if len(self.plan_calls) == 1:
+            return {
+                "tasks": [
+                    {
+                        "tool": "log_grep",
+                        "params": {"path": log_path, "pattern": self.pattern, "limit": 50},
+                        "rationale": "check ghost pattern",
+                    }
+                ]
+            }
+        return {"tasks": []}
+
+
+def test_loop_feeds_empty_task_back_to_llm(tmp_path):
+    # 第一个 grep 任务返回空列表 → 标记 empty("No matches found")；
+    # 第二轮 analyze/plan 的 LLM 上下文必须携带该失败信息，供其避开无效 pattern
+    log = tmp_path / "moray.err.log"
+    log.write_text("2026-10-24 10:00:00 ERROR real error here\n", encoding="utf-8")
+    settings = dataclasses.replace(
+        Settings(),
+        log_path=str(log),
+        readonly_roots_raw=str(tmp_path),
+        max_iterations=3,
+        auto_approve_readonly=True,
+    )
+    memory = Memory(str(tmp_path / "memory.sqlite3"))
+    tools = ToolRegistry(settings.readonly_roots, settings.max_scan_bytes)
+    llm = _ScriptedLLM(pattern="GHOST_PATTERN_XYZ")
+    loop = EvolutionLoop(
+        settings=settings, memory=memory, tools=tools, llm=llm, auto_approve_readonly=True
+    )
+
+    ep = loop.start()
+
+    assert ep.phase == Phase.CONCLUDED
+    assert ep.tasks[0]["status"] == "empty"
+    assert ep.tasks[0]["error"] == "No matches found"
+
+    # 第二轮 analyze 收到 failed/empty 反馈
+    assert len(llm.analyze_calls) >= 2
+    second_failed = llm.analyze_calls[1]["failed"]
+    assert second_failed, "第二轮 analyze 的上下文必须包含 empty 任务"
+    assert any(
+        t["tool"] == "log_grep" and t["status"] == "empty" and t["error"] == "No matches found"
+        for t in second_failed
+    )
+
+    # 第二轮 plan 收到同样的反馈（可据此避开 GHOST_PATTERN_XYZ）
+    assert len(llm.plan_calls) >= 2
+    plan_failed = llm.plan_calls[1]["failed"]
+    assert any(t["tool"] == "log_grep" and t.get("error") == "No matches found" for t in plan_failed)
+    # 反馈里必须能定位到无效 pattern 本身
+    assert "GHOST_PATTERN_XYZ" in repr(plan_failed)

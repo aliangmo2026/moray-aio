@@ -45,13 +45,22 @@ def propose_tasks(
     tools,
     llm=None,
     auto_approve_readonly: bool = True,
+    failed_tasks: Optional[List[dict]] = None,
 ) -> List[dict]:
-    """生成下一批只读侦查任务（时间无关，纯函数式入口）。"""
+    """生成下一批只读侦查任务（时间无关，纯函数式入口）。
+
+    failed_tasks：上一轮 failed/empty 任务及其原因，作为 LLM 的反馈上下文，
+    让下一轮规划避开已被证伪的 pattern/参数。
+    """
     candidates: List[dict] = []
     if llm is not None:
         try:
             raw = llm.plan_tasks(
-                errors=errors, log_path=log_path, tools=tools.describe(), existing=existing_tasks
+                errors=errors,
+                log_path=log_path,
+                tools=tools.describe(),
+                existing=existing_tasks,
+                failed=failed_tasks,
             )
             candidates = _coerce_llm_tasks(raw)
         except Exception:

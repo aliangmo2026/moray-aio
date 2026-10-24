@@ -108,11 +108,12 @@ class OllamaClient:
             return {"raw": raw, "parse_error": True}
         return parsed if isinstance(parsed, dict) else {"raw": raw, "parse_error": True}
 
-    def analyze(self, errors: List[str], extra: Optional[list] = None, lessons: Optional[list] = None) -> dict:
+    def analyze(self, errors: List[str], extra: Optional[list] = None, lessons: Optional[list] = None, failed: Optional[list] = None) -> dict:
         prompt = ANALYZE_USER.format(
             lessons=_bullets(lessons),
             errors=_bullets(errors),
             extra=_bullets(extra),
+            failed=_bullets(failed),
         )
         return self._generate(prompt, ANALYZE_SYSTEM)
 
@@ -123,6 +124,7 @@ class OllamaClient:
         tools: str,
         existing: Optional[list] = None,
         lessons: Optional[list] = None,
+        failed: Optional[list] = None,
     ) -> dict:
         prompt = PLAN_USER.format(
             lessons=_bullets(lessons),
@@ -130,6 +132,7 @@ class OllamaClient:
             existing=_bullets(existing),
             tools=tools,
             log_path=log_path,
+            failed=_bullets(failed),
         )
         return self._generate(prompt, PLAN_SYSTEM)
 

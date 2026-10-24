@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app import __version__
 from app.config import settings
-from app.deps import get_loop, get_tools
+from app.deps import get_llm, get_loop, get_memory, get_tools
 from app.tools.log_reader import LogReadError, check_readable, recent_errors
 
 router = APIRouter()
@@ -20,13 +20,15 @@ router = APIRouter()
 
 @router.get("/health")
 def health():
-    """健康检查：附带目标日志文件的只读探测结果（不读内容）。"""
+    """健康检查：目标日志只读探测 + Ollama 可用性（探测失败不影响服务）。"""
+    llm = get_llm()
     return {
         "status": "ok",
         "app": settings.app_name,
         "version": __version__,
         "time": datetime.now(timezone.utc).isoformat(),
         "log": check_readable(settings.log_path),
+        "ollama": {"available": llm.is_available(), "model": settings.ollama_model},
     }
 
 
@@ -94,6 +96,30 @@ def reject_task(episode_id: str, task_id: str):
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/episodes/{episode_id}/tasks/approve-all")
+def approve_all_tasks(episode_id: str):
+    """批量批准：只批准 status=proposed 且 tool 在只读白名单内的任务。"""
+    try:
+        return get_loop().approve_all(episode_id).to_dict()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post("/episodes/{episode_id}/tasks/reject-all")
+def reject_all_tasks(episode_id: str):
+    """批量拒绝：所有 status=proposed 的任务一律 rejected。"""
+    try:
+        return get_loop().reject_all(episode_id).to_dict()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/memory/reflections")
+def list_reflections(limit: int = Query(default=5, ge=1, le=50)):
+    """最近的反思/教训记录（长效记忆，只读查询）。"""
+    return get_memory().recent_reflections(limit=limit)
 
 
 @router.post("/episodes/{episode_id}/resume")

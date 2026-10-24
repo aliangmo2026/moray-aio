@@ -91,6 +91,24 @@ class EvolutionLoop:
         self.memory.save(ep)
         return ep
 
+    def approve_all(self, episode_id: str) -> Episode:
+        """批量批准：仅 status=proposed 且 tool 在只读白名单内的任务会被批准。"""
+        ep = self.require(episode_id)
+        for task in ep.tasks:
+            if task.get("status") == "proposed" and task.get("tool") in approval.READONLY_TOOLS:
+                task["status"] = "approved"
+        self.memory.save(ep)
+        return ep
+
+    def reject_all(self, episode_id: str) -> Episode:
+        """批量拒绝：所有 status=proposed 的任务一律 rejected。"""
+        ep = self.require(episode_id)
+        for task in ep.tasks:
+            if task.get("status") == "proposed":
+                task["status"] = "rejected"
+        self.memory.save(ep)
+        return ep
+
     def list_recent(self, limit: int = 20) -> List[Episode]:
         return self.memory.list_recent(limit=limit)
 
@@ -156,11 +174,14 @@ class EvolutionLoop:
         errors = self._last_errors(ep)
         extra = [o for o in ep.observations if o.get("kind") != "recent_errors"]
         lessons = [r["lesson"] for r in self.memory.recent_reflections(limit=5)]
+        failed = self._failed_tasks(ep)
 
         analysis = None
         if self.llm is not None and self.llm.is_available():
             try:
-                analysis = self.llm.analyze(errors=errors, extra=extra, lessons=lessons)
+                analysis = self.llm.analyze(
+                    errors=errors, extra=extra, lessons=lessons, failed=failed
+                )
             except Exception:
                 analysis = None  # LLM 抖动 → 启发式兜底
         if not isinstance(analysis, dict) or analysis.get("parse_error"):
@@ -172,6 +193,7 @@ class EvolutionLoop:
         errors = self._last_errors(ep)
         extra = [o for o in ep.observations if o.get("kind") != "recent_errors"]
         lessons = [r["lesson"] for r in self.memory.recent_reflections(limit=5)]
+        failed = self._failed_tasks(ep)
         use_llm = self.llm is not None and self.llm.is_available()
         new_tasks = propose_tasks(
             errors=errors,
@@ -180,6 +202,7 @@ class EvolutionLoop:
             tools=self.tools,
             llm=self.llm if use_llm else None,
             auto_approve_readonly=self.auto_approve_readonly,
+            failed_tasks=failed,
         )
         for task in new_tasks:
             if task.get("status") == "pending":
@@ -194,8 +217,14 @@ class EvolutionLoop:
                 continue
             try:
                 result = self.tools.call(task["tool"], task.get("params") or {})
-                task["status"] = "done"
                 task["result"] = result
+                if isinstance(result, list) and len(result) == 0:
+                    # 空结果：不算执行错误，但对定位根因没有贡献；
+                    # 标记 empty 并记录原因，反馈给下一轮规划避开该 pattern/参数。
+                    task["status"] = "empty"
+                    task["error"] = "No matches found"
+                else:
+                    task["status"] = "done"
             except Exception as exc:
                 # 单任务失败只标 failed 记 error，不阻塞其他任务
                 task["status"] = "failed"
@@ -251,6 +280,22 @@ class EvolutionLoop:
             if obs.get("kind") == "recent_errors":
                 return [e.get("text", "") for e in obs.get("errors", [])]
         return []
+
+    def _failed_tasks(self, ep: Episode) -> List[dict]:
+        """上一轮 failed/empty 任务及其原因，作为下一轮 LLM 的反馈上下文。"""
+        out: List[dict] = []
+        for task in ep.tasks:
+            if task.get("status") in ("failed", "empty"):
+                out.append(
+                    {
+                        "tool": task.get("tool"),
+                        "params": task.get("params"),
+                        "status": task.get("status"),
+                        "error": task.get("error"),
+                        "rationale": task.get("rationale"),
+                    }
+                )
+        return out
 
     @staticmethod
     def _find_task(ep: Episode, task_id: str) -> dict:

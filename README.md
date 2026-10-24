@@ -62,6 +62,9 @@ pip install -r requirements-dev.txt
 # 跑测试
 pytest -q
 
+# 拉取本地模型（Ollama 不可用时服务自动走启发式兜底，不阻塞启动）
+ollama pull qwen2.5:7b
+
 # 起服务
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8020
 ```
@@ -88,14 +91,44 @@ $env:MORAY_AIO_LOG_PATH       = "C:\temp\demo-logs\moray.err.log"
 | GET | `/episodes/{id}` | 单个 episode 详情 |
 | POST | `/episodes/{id}/tasks/{task_id}/approve` | 批准待审批任务；非只读工具 403 |
 | POST | `/episodes/{id}/tasks/{task_id}/reject` | 否决待审批任务 |
+| POST | `/episodes/{id}/tasks/approve-all` | 批量批准：仅 proposed 且只读白名单内的任务 |
+| POST | `/episodes/{id}/tasks/reject-all` | 批量拒绝：所有 proposed 任务 |
 | POST | `/episodes/{id}/resume` | 恢复迭代：无待审批任务时执行 approved 任务并继续循环 |
+| GET | `/memory/reflections?limit=5` | 最近反思/教训记录（长效记忆，只读） |
 
 交互文档：服务启动后访问 `/docs`（Swagger UI）。
+
+## 一键演示
+
+服务运行期间，另开一个终端：
+
+```powershell
+python scripts/demo.py
+# 或指定服务地址：python scripts/demo.py http://127.0.0.1:8020
+# 或 set MORAY_AIO_DEMO_URL=http://127.0.0.1:8020
+```
+
+脚本（仅标准库 urllib）会自动：POST /episodes → 打印 phase 与待审批任务 →
+approve-all（服务端只批只读白名单内的任务）→ resume → 循环直到
+`concluded/failed`，最后打印结论与长效记忆（反思记录），方便一键观看
+Agent 自驱分析的全过程。
+
+想在本地临时日志上体验（不动 D:\MoRay）：
+
+```powershell
+$env:MORAY_AIO_READONLY_ROOTS        = "C:\temp\demo-logs"
+$env:MORAY_AIO_LOG_PATH              = "C:\temp\demo-logs\moray.err.log"
+$env:MORAY_AIO_AUTO_APPROVE_READONLY = "false"   # 让 demo 展示审批环节
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8020
+python scripts\demo.py
+```
 
 ## Episode 生命周期
 
 `created → observing → analyzing → proposing → (awaiting_approval ⇄) executing → analyzing → … → concluded`
-任何阶段异常进入 `failed`（终态）。任务状态：`proposed`（等人工）→ `approved/rejected` → `done/failed`。
+任何阶段异常进入 `failed`（终态）。任务状态：`proposed`（等人工）→ `approved/rejected` →
+`done/failed/empty`（empty = 执行成功但匹配为空，记 `No matches found`，会把无效 pattern
+反馈给下一轮 LLM 规划避开）。
 只读任务在 `MORAY_AIO_AUTO_APPROVE_READONLY=true` 时自动批准；启发式规则会针对
 连接被拒 / 超时 / 文件缺失自动提出 `log_grep` 侦查任务，并按 (tool, params) 去重。
 
