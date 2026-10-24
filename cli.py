@@ -221,6 +221,68 @@ def cmd_health(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- watch
+
+def cmd_watch(args) -> int:
+    """直接启动 Watch 模式（不起 FastAPI）：日志变化 → 规则触发 → 终端彩色告警。"""
+    import time as _time
+
+    from app.config import Settings
+    from app.kernel.loop import EvolutionLoop
+    from app.kernel.sqlite_repository import Memory
+    from app.kernel.trigger_rules import parse_rules_config
+    from app.kernel.watch_service import WatchService
+    from app.kernel.watcher import LogWatcher
+    from app.notifier import build_notifiers
+    from app.llm.ollama_client import OllamaClient
+    from app.tools.registry import ToolRegistry
+
+    s = Settings()
+    tools = ToolRegistry(
+        s.readonly_roots,
+        s.max_scan_bytes,
+        probe_host_whitelist=s.probe_host_whitelist,
+        probe_max_processes=s.probe_max_processes,
+        probe_output_max_bytes=s.probe_output_max_bytes,
+        plugin_dirs=s.plugin_dirs,
+    )
+    log_path = args.log_path or s.log_path
+    checked = tools._check_path(str(log_path))  # 白名单 fail-closed
+    memory = Memory(s.memory_db_path)
+    llm = OllamaClient(
+        s.ollama_url, s.ollama_model, s.ollama_timeout, allowed_hosts=s.ollama_allowed_hosts
+    )
+    loop = EvolutionLoop(
+        settings=s, memory=memory, tools=tools, llm=llm, auto_approve_readonly=True
+    )
+    watcher = LogWatcher(str(checked), on_lines=lambda lines: None,
+                         poll_interval=s.watch_poll_interval_seconds)
+    service = WatchService(
+        log_path=str(checked),
+        rules=parse_rules_config(s.watch_rules_config),
+        watcher=watcher,
+        loop=loop,
+        notifier=build_notifiers(s),
+        check_interval=s.watch_poll_interval_seconds,
+    )
+
+    print(paint("== moray-aio watch ==", "bold"))
+    print("  监听文件: {}".format(checked))
+    print("  轮询间隔: {}s   规则: {}".format(
+        s.watch_poll_interval_seconds, ", ".join(service.engine.fire_count)))
+    print(paint("  按 Ctrl+C 优雅退出", "dim"))
+    service.start()
+    try:
+        while True:
+            _time.sleep(1)
+    except KeyboardInterrupt:
+        print(paint("\n收到 Ctrl+C，停止监听...", "yellow"))
+    finally:
+        service.stop()
+        print(paint("已停止。notifications_sent={}".format(service.notifications_sent), "dim"))
+    return 0
+
+
 # ---------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
@@ -241,6 +303,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_health = sub.add_parser("health", help="检查服务状态")
     p_health.add_argument("--url", default=None, help="服务地址（默认 {}）".format(DEFAULT_URL))
     p_health.set_defaults(func=cmd_health)
+
+    p_watch = sub.add_parser("watch", help="启动日志监听（事件驱动自动分析并告警）")
+    p_watch.add_argument("--log-path", default=None, help="被监听日志（默认 settings.log_path）")
+    p_watch.set_defaults(func=cmd_watch)
 
     return parser
 

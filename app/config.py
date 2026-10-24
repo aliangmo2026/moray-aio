@@ -33,7 +33,7 @@ class Settings:
     """只读配置。默认值面向 MoRay 主项目，可用 MORAY_AIO_* 环境变量覆盖。"""
 
     app_name: str = "moray-aio"
-    version: str = "0.6.0"
+    version: str = "0.7.0"
 
     # HTTP 服务
     host: str = field(default_factory=lambda: _env_str("MORAY_AIO_HOST", "127.0.0.1"))
@@ -115,6 +115,29 @@ class Settings:
     )
     # API 鉴权：非空时所有请求（除 GET /health）必须携带 X-API-Key（只从环境变量读取）
     api_key: str = field(default_factory=lambda: _env_str("MORAY_AIO_API_KEY", ""))
+
+    # ---- 事件驱动 Watch 模式（v0.7.0）----
+    # 默认关闭（安全优先），需手动开启；开启后 lifespan 自动启动监听线程
+    watch_enabled: bool = field(default_factory=lambda: _env_bool("MORAY_AIO_WATCH_ENABLED", False))
+    watch_poll_interval_seconds: float = field(
+        default_factory=lambda: float(_env_int("MORAY_AIO_WATCH_POLL_INTERVAL_SECONDS", 2))
+    )
+    # 可选 JSON 数组覆盖默认触发规则
+    watch_rules_config: str = field(
+        default_factory=lambda: _env_str("MORAY_AIO_WATCH_RULES_CONFIG", "")
+    )
+    # 告警推送：console;webhook;file（分号分隔）
+    notifier_types_raw: str = field(
+        default_factory=lambda: _env_str("MORAY_AIO_NOTIFIER_TYPES", "console")
+    )
+    webhook_url: str = field(default_factory=lambda: _env_str("MORAY_AIO_WEBHOOK_URL", ""))
+    # Webhook 域名白名单（分号分隔）：为空时 webhook 推送拒绝工作（fail-closed）
+    webhook_allowed_hosts_raw: str = field(
+        default_factory=lambda: _env_str("MORAY_AIO_WEBHOOK_ALLOWED_HOSTS", "")
+    )
+    alerts_log_path: str = field(
+        default_factory=lambda: _env_str("MORAY_AIO_ALERTS_LOG_PATH", "data/alerts.log")
+    )
 
     @property
     def readonly_roots(self) -> list:

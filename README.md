@@ -42,7 +42,11 @@ E:\moray-aio\
 │   │   ├── postgres_repository.py # Postgres 实现（MORAY_AIO_DB_DSN 启用）
 │   │   ├── approval.py     # 审批闸门（classify/decide）
 │   │   ├── planner.py      # 自驱任务生成（LLM 优先 / 启发式兜底）
-│   │   └── loop.py         # 主循环 Observe→Analyze→Propose→(审批)→Execute
+│   │   ├── loop.py         # 主循环 Observe→Analyze→Propose→(审批)→Execute
+│   │   ├── watcher.py      # 日志监听器（os.stat 轮询，只读 rb，旋转容错）
+│   │   ├── trigger_rules.py# 触发规则引擎（burst/keyword/spike + 冷却）
+│   │   └── watch_service.py# Watch 主循环（监听→触发→分析→告警）
+│   ├── notifier.py         # 告警推送：Console/Webhook/File（隔离扇出）
 │   ├── tools\              # 只读工具集（全部插件化）
 │   │   ├── plugin_base.py  # BaseTool 插件基类（name/description/risk_level/params_schema/invoke）
 │   │   ├── builtin\        # 内置工具：log_tools.py（4 个日志工具）+ probe_tools.py（4 个探针）
@@ -102,6 +106,9 @@ $env:MORAY_AIO_LOG_PATH       = "C:\temp\demo-logs\moray.err.log"
 | --- | --- | --- |
 | GET | `/health` | 健康检查；`log` 字段为目标日志的只读探测（exists/readable/size_bytes），`ollama` 为模型可用性 |
 | GET | `/metrics` | 全局统计：episode 数/成功率/Token 消耗/平均耗时/任务分布 |
+| POST | `/watch/start` | 启动日志监听（幂等；日志路径须在白名单内） |
+| POST | `/watch/stop` | 停止日志监听 |
+| GET | `/watch/status` | 监听状态：running/规则命中统计/最近触发/待完成 episode |
 | GET | `/logs/recent-errors?limit=10` | 最近 N 条 ERROR（时间正序）；文件不存在 404，白名单外 403 |
 | POST | `/episodes?trigger=recent_errors` | **异步**启动迭代：202 + `{episode_id, phase:"created"}`，后台执行，轮询下一条接口 |
 | POST | `/episodes/sync` | 同步启动（调试用）：阻塞到终态/审批点，返回完整 episode |
@@ -241,6 +248,25 @@ LLM 用量；analyze/propose 每次调用后累计，超限立即 `FAILED`（err
 **4. 网络重试**。Ollama 调用带指数退避（1s/2s/4s，最多 3 次）：网络超时/连接错误/5xx 重试，
 4xx 不重试直接抛出；重试次数进 trace（`llm.retries`）与日志。
 
+## v0.7.0：事件驱动的主动运维
+
+**1. 日志监听器**（`app/kernel/watcher.py`）：`os.stat` 轮询（跨平台，Windows 无 inotify），
+只读 `'rb'` 打开；logrotate 截断自动归零、文件删除重建自动重探；异常只记日志不崩线程。
+
+**2. 触发规则引擎**（`app/kernel/trigger_rules.py`）：Rule（pattern/threshold/window/cooldown）
++ 三条默认规则——`rapid_error_burst`（60s 内 ≥5 条 ERROR）、`critical_keywords`
+（OOM/Connection refused/Segmentation fault/panic 单次即触发）、`error_spike`（60s 突增 3 倍）；
+冷却期内重复命中不触发。`MORAY_AIO_WATCH_RULES_CONFIG` 可用 JSON 覆盖。
+
+**3. 告警推送**（`app/notifier.py`）：Console / Webhook（钉钉/飞书/Slack 通用 + 自定义模板，
+URL 强校验：http/https + 域名白名单 + 拒环回/私有/保留地址 + 防 DNS rebinding + 禁重定向）/
+File（只写自己的 `data/alerts.log`）；多 Notifier 隔离扇出，单点失败不影响其他。
+
+**4. Watch 模式**（`app/kernel/watch_service.py`）：监听 → 规则触发 → `start_async` 自驱分析 →
+episode 终态推送结论（concluded）或错误（failed）。`MORAY_AIO_WATCH_ENABLED=true` 时
+服务启动即监听（默认关闭）；`POST /watch/start|stop`、`GET /watch/status` 手动控制；
+`python cli.py watch --log-path <path>` 直接在终端跑（Ctrl+C 优雅退出）。
+
 ## 版本
 
 - **v0.2.0**（tag）：MVP——Ollama 接入、自我迭代内核、批量审批、demo CLI。
@@ -248,6 +274,7 @@ LLM 用量；analyze/propose 每次调用后累计，超限立即 `FAILED`（err
 - **v0.4.0**（tag）：只读系统探针、planner 智能派发、历史相似案例检索。
 - **v0.5.0**（tag）：trace/metrics 可观测性、BaseTool 插件化、CLI、Docker。
 - **v0.6.0**（tag）：Repository 抽象（SQLite/Postgres）、Token 熔断、API 鉴权、网络重试。
+- **v0.7.0**（tag）：事件驱动 Watch——日志监听、触发规则、Webhook 告警、自驱分析闭环。
 
 ## Episode 生命周期
 

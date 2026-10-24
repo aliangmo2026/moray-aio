@@ -134,6 +134,35 @@ def metrics():
     return get_memory().metrics()
 
 
+# ---------------------------------------------------------------- watch 模式
+
+@router.post("/watch/start")
+def watch_start():
+    """手动启动日志监听（幂等；log_path 必须在只读白名单内）。"""
+    from app.kernel.watch_service import get_watch_manager
+
+    try:
+        return get_watch_manager().start()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/watch/stop")
+def watch_stop():
+    """停止日志监听（幂等）。"""
+    from app.kernel.watch_service import get_watch_manager
+
+    return get_watch_manager().stop()
+
+
+@router.get("/watch/status")
+def watch_status():
+    """监听状态：running、规则命中统计、最近触发时间、待完成 episode 数。"""
+    from app.kernel.watch_service import get_watch_manager
+
+    return get_watch_manager().status()
+
+
 @router.get("/memory/reflections")
 def list_reflections(limit: int = Query(default=5, ge=1, le=50)):
     """最近的反思/教训记录（长效记忆，只读查询）。"""
