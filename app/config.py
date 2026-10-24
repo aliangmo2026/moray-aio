@@ -33,7 +33,7 @@ class Settings:
     """只读配置。默认值面向 MoRay 主项目，可用 MORAY_AIO_* 环境变量覆盖。"""
 
     app_name: str = "moray-aio"
-    version: str = "0.3.0"
+    version: str = "0.4.0"
 
     # HTTP 服务
     host: str = field(default_factory=lambda: _env_str("MORAY_AIO_HOST", "127.0.0.1"))
@@ -89,6 +89,18 @@ class Settings:
     # 错误聚类：喂给 LLM 的最大类数
     cluster_top_n: int = field(default_factory=lambda: _env_int("MORAY_AIO_CLUSTER_TOP_N", 10))
 
+    # 只读系统探针
+    # 探针可连的主机白名单（分号分隔）；默认与 Ollama 白名单同值（仅本机）
+    probe_host_whitelist_raw: str = field(
+        default_factory=lambda: _env_str("MORAY_AIO_PROBE_HOST_WHITELIST", "127.0.0.1;localhost;::1")
+    )
+    probe_max_processes: int = field(
+        default_factory=lambda: _env_int("MORAY_AIO_PROBE_MAX_PROCESSES", 50)
+    )
+    probe_output_max_bytes: int = field(
+        default_factory=lambda: _env_int("MORAY_AIO_PROBE_OUTPUT_MAX_BYTES", 4096)
+    )
+
     @property
     def readonly_roots(self) -> list:
         """白名单根目录列表；空片段忽略。"""
@@ -98,6 +110,11 @@ class Settings:
     def ollama_allowed_hosts(self) -> list:
         """Ollama 主机白名单列表；空片段忽略。"""
         return [h.strip() for h in self.ollama_allowed_hosts_raw.split(";") if h.strip()]
+
+    @property
+    def probe_host_whitelist(self) -> list:
+        """探针可连主机白名单列表；空片段忽略。"""
+        return [h.strip() for h in self.probe_host_whitelist_raw.split(";") if h.strip()]
 
 
 settings = Settings()

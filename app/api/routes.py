@@ -134,6 +134,14 @@ def list_reflections(limit: int = Query(default=5, ge=1, le=50)):
     return get_memory().recent_reflections(limit=limit)
 
 
+@router.get("/memory/similar")
+def find_similar_episodes(keywords: str = Query(...), top_k: int = Query(default=3, ge=1, le=10),
+                          threshold: float = Query(default=0.3, ge=0.0, le=1.0)):
+    """按关键词（逗号分隔）检索历史相似 episode（Jaccard 相似度，只读调试用）。"""
+    words = [w.strip() for w in keywords.split(",") if w.strip()]
+    return get_memory().find_similar(words, top_k=top_k, threshold=threshold)
+
+
 @router.post("/episodes/{episode_id}/resume")
 def resume_episode(episode_id: str):
     """恢复一次迭代：无待审批任务时执行 approved 任务并继续循环。"""

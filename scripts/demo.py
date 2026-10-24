@@ -3,17 +3,22 @@
 自动连接本机 moray-aio 服务（默认 http://127.0.0.1:8020），
 以异步模式现场观看 Agent 自驱只读分析的全过程：
 
-    POST /episodes                     → 202 + episode_id（后台执行）
+    POST /episodes                     -> 202 + episode_id（后台执行）
     轮询 GET /episodes/{id}（每 2 秒，最多 60 次）
-    → phase=awaiting_approval 时：
+    -> phase=awaiting_approval 时：
         POST /episodes/{id}/tasks/approve-all   （服务端只批只读白名单内的任务）
         POST /episodes/{id}/resume
-    → 直到 phase=concluded / failed
-    → 打印最终结论与长效记忆（反思记录）
+    -> 直到 phase=concluded / failed
+    -> 打印最终结论、探针结果（probe 模式）与长效记忆（反思记录）
 
 用法：
     python scripts/demo.py [BASE_URL]
-    # 或 set MORAY_AIO_DEMO_URL=http://127.0.0.1:8020
+    set MORAY_AIO_DEMO_URL=http://127.0.0.1:8020
+    set MORAY_AIO_DEMO_MODE=probe        # 探针演示：用模拟日志观察探针派发
+
+probe 模式需要当前工作目录下存在演示日志 moray-demo-fixture.log（含
+Connection refused 127.0.0.1:6379）。出于安全策略本脚本不写任何文件：
+夹具缺失时会打印其内容与创建指引，创建后重试即可。
 """
 
 from __future__ import annotations
@@ -31,6 +36,39 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8020"
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 POLL_INTERVAL_SECONDS = 2
 MAX_POLLS = 60
+PROBE_TOOLS = {"port_check", "process_list", "disk_usage", "windows_service_status"}
+
+# probe 模式演示夹具：固定文件名字符串字面量（单层文件名，无目录分量、无 ..）
+FIXTURE_LOG_NAME = "moray-demo-fixture.log"
+
+# probe 模式：模拟一份「Connection refused 127.0.0.1:6379」日志，观察 Agent 是否派发探针
+SIMULATED_LOG = "\n".join(
+    [
+        "2026-10-24 18:00:00 INFO moray backend started",
+        "2026-10-24 18:01:12 ERROR Connection refused to cache 127.0.0.1:6379",
+        "2026-10-24 18:02:40 ERROR Connection refused to cache 127.0.0.1:6379",
+        "2026-10-24 18:04:01 INFO job tick",
+    ]
+) + "\n"
+
+
+def ensure_simulated_log() -> str:
+    """probe 模式夹具检查（只读）：存在返回文件名；缺失则打印内容与创建指引并返回空串。
+
+    出于安全策略（脚本内不允许文件写入），本脚本不创建夹具；
+    请按下述指引预先创建后再运行 probe 模式。
+    """
+    if os.path.isfile(FIXTURE_LOG_NAME):
+        return FIXTURE_LOG_NAME
+    print("[probe 模式] 未找到演示日志 {}（安全策略下本脚本不写文件）。".format(FIXTURE_LOG_NAME))
+    print("请先在当前工作目录创建该文件，内容如下：")
+    print("-" * 56)
+    for line in SIMULATED_LOG.splitlines():
+        print(line)
+    print("-" * 56)
+    print("创建示例（PowerShell，在脚本工作目录执行）：")
+    print("  Set-Content -Path moray-demo-fixture.log -Encoding UTF8 -Value '2026-10-24 18:00:00 INFO moray backend started','2026-10-24 18:01:12 ERROR Connection refused to cache 127.0.0.1:6379','2026-10-24 18:02:40 ERROR Connection refused to cache 127.0.0.1:6379','2026-10-24 18:04:01 INFO job tick'")
+    return ""
 
 
 def validate_base_url(base_url: str) -> str:
@@ -123,10 +161,18 @@ def main():
     if len(sys.argv) > 1:
         base = sys.argv[1]
     origin = validate_base_url(base)
+    mode = (os.environ.get("MORAY_AIO_DEMO_MODE") or "log").strip().lower()
 
-    print("== moray-aio 一键演示（异步模式）==")
+    print("== moray-aio 一键演示（异步模式，mode={}）==".format(mode))
     print("目标服务: {}".format(origin))
     print("说明: 只调用只读分析接口；approve-all 只会批准服务端白名单内的只读任务。\n")
+
+    if mode == "probe":
+        log_path = ensure_simulated_log()
+        if not log_path:
+            raise SystemExit("probe 夹具缺失：请按上方指引创建 moray-demo-fixture.log 后重试。")
+        print("[probe 模式] 使用模拟日志: {}\\{}（含 Connection refused 127.0.0.1:6379）".format(os.getcwd(), log_path))
+        print("  （服务需以 MORAY_AIO_READONLY_ROOTS / MORAY_AIO_LOG_PATH 指向该目录启动）\n")
 
     created = api(origin, "POST", "/episodes")
     if created is None:
@@ -167,6 +213,23 @@ def main():
     print_episode(ep, header="最终 episode:")
     print_tasks(ep.get("tasks"))
     print("\n结论: {}".format(ep.get("conclusion") or "(无)"))
+
+    if mode == "probe":
+        print("\n==== 探针结果（Agent 现在看得见系统状态了）====")
+        found = False
+        for task in ep.get("tasks") or []:
+            if task.get("tool") in PROBE_TOOLS:
+                found = True
+                print(
+                    "  - [{}] {} params={} result={}".format(
+                        task.get("status"),
+                        task.get("tool"),
+                        json.dumps(task.get("params"), ensure_ascii=False),
+                        json.dumps(task.get("result"), ensure_ascii=False)[:300],
+                    )
+                )
+        if not found:
+            print("  （本轮未派发探针任务）")
 
     print("\n==== 长效记忆（最近反思）====")
     reflections = api(origin, "GET", "/memory/reflections?limit=5") or []

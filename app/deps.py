@@ -19,8 +19,14 @@ def get_memory() -> Memory:
 
 @lru_cache(maxsize=1)
 def get_tools() -> ToolRegistry:
-    """只读工具注册表（白名单来自 settings.readonly_roots）。"""
-    return ToolRegistry(settings.readonly_roots, settings.max_scan_bytes)
+    """只读工具注册表（日志白名单 + 探针白名单均来自 settings）。"""
+    return ToolRegistry(
+        settings.readonly_roots,
+        settings.max_scan_bytes,
+        probe_host_whitelist=settings.probe_host_whitelist,
+        probe_max_processes=settings.probe_max_processes,
+        probe_output_max_bytes=settings.probe_output_max_bytes,
+    )
 
 
 @lru_cache(maxsize=1)

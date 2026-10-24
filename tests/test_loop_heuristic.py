@@ -90,7 +90,8 @@ def test_loop_awaits_approval_then_resume_concludes(tmp_path):
     # 未批准前 resume 应原样返回（还有 proposed）
     assert loop.resume(ep.id).phase == Phase.AWAITING_APPROVAL
 
-    loop.approve_task(ep.id, proposed[0]["id"])
+    for task in proposed:
+        loop.approve_task(ep.id, task["id"])
     ep2 = loop.resume(ep.id)
     assert ep2.phase == Phase.CONCLUDED
     assert any(t["status"] == "done" for t in ep2.tasks)
@@ -102,7 +103,8 @@ def test_loop_reject_task_leads_to_conclusion(tmp_path):
     ep = loop.start()
     proposed = [t for t in ep.tasks if t["status"] == "proposed"]
     assert proposed
-    loop.reject_task(ep.id, proposed[0]["id"])
+    for task in proposed:
+        loop.reject_task(ep.id, task["id"])
 
     ep2 = loop.resume(ep.id)
     assert ep2.phase == Phase.CONCLUDED
@@ -187,8 +189,8 @@ class _ScriptedLLM:
     def is_available(self):
         return True
 
-    def analyze(self, errors, extra=None, lessons=None, failed=None):
-        self.analyze_calls.append({"errors": list(errors), "failed": failed})
+    def analyze(self, errors, extra=None, lessons=None, failed=None, similar=None):
+        self.analyze_calls.append({"errors": list(errors), "failed": failed, "similar": similar})
         return {
             "summary": "scripted",
             "likely_root_causes": [],

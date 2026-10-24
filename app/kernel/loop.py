@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from app.kernel import approval
+from app.kernel.memory import extract_keywords
 from app.kernel.planner import propose_tasks
 from app.kernel.state import Episode, Phase
 from app.tools import clusterer, log_reader
@@ -97,7 +98,7 @@ class EvolutionLoop:
     def approve_task(self, episode_id: str, task_id: str) -> Episode:
         ep = self.require(episode_id)
         task = self._find_task(ep, task_id)
-        if task["tool"] not in approval.READONLY_TOOLS:
+        if task["tool"] not in approval.SAFE_TOOLS:
             raise PermissionError(
                 "refusing to approve non-readonly tool {!r}".format(task["tool"])
             )
@@ -121,10 +122,10 @@ class EvolutionLoop:
         return ep
 
     def approve_all(self, episode_id: str) -> Episode:
-        """批量批准：仅 status=proposed 且 tool 在只读白名单内的任务会被批准。"""
+        """批量批准：仅 status=proposed 且 tool 属于只读白名单（日志类+探针类）的任务会被批准。"""
         ep = self.require(episode_id)
         for task in ep.tasks:
-            if task.get("status") == "proposed" and task.get("tool") in approval.READONLY_TOOLS:
+            if task.get("status") == "proposed" and task.get("tool") in approval.SAFE_TOOLS:
                 task["status"] = "approved"
         self.memory.save(ep)
         return ep
@@ -240,15 +241,26 @@ class EvolutionLoop:
             "[x{}] {} | 样本: {}".format(c["count"], c["template"], c["sample_line"])
             for c in clusters
         ]
-        extra = [o for o in ep.observations if o.get("kind") != "recent_errors"]
+        extra = self._summarize_extra(ep)
         lessons = [r["lesson"] for r in self.memory.recent_reflections(limit=5)]
         failed = self._failed_tasks(ep)
+        # 历史相似 episode 检索（关键词 Jaccard，不依赖 embedding）
+        keywords = extract_keywords(raw_errors, top_n=10)
+        similar = (
+            self.memory.find_similar(keywords, top_k=3, exclude_episode_id=ep.id)
+            if keywords
+            else []
+        )
 
         analysis = None
         if self.llm is not None and self.llm.is_available():
             try:
                 analysis = self.llm.analyze(
-                    errors=clustered_errors, extra=extra, lessons=lessons, failed=failed
+                    errors=clustered_errors,
+                    extra=extra,
+                    lessons=lessons,
+                    failed=failed,
+                    similar=similar,
                 )
             except Exception:
                 analysis = None  # LLM 抖动 → 启发式兜底
@@ -256,6 +268,46 @@ class EvolutionLoop:
             analysis = self._heuristic_analysis(clustered_errors)
         ep.analysis = analysis
         self.memory.save(ep)
+
+    @staticmethod
+    def _summarize_extra(ep: Episode) -> List[dict]:
+        """把观测里的探针结果压缩后再注入 LLM（process_list 50 条只留 count+前 3 个名字）。"""
+        out: List[dict] = []
+        for obs in ep.observations:
+            if obs.get("kind") == "recent_errors":
+                continue
+            if obs.get("kind") in ("task_result", "probe") and obs.get("tool") == "process_list":
+                result = obs.get("result") or {}
+                processes = result.get("processes") or []
+                out.append(
+                    {
+                        "kind": "task_result",
+                        "tool": "process_list",
+                        "task_id": obs.get("task_id"),
+                        "status": obs.get("status"),
+                        "summary": {
+                            "count": result.get("count"),
+                            "sample_names": [p.get("name") for p in processes[:3]],
+                        },
+                        "error": obs.get("error"),
+                    }
+                )
+                continue
+            if obs.get("kind") in ("task_result", "probe") and obs.get("tool") == "windows_service_status":
+                result = obs.get("result") or {}
+                out.append(
+                    {
+                        "kind": "task_result",
+                        "tool": "windows_service_status",
+                        "task_id": obs.get("task_id"),
+                        "status": obs.get("status"),
+                        "summary": {"name": result.get("name"), "state": result.get("state")},
+                        "error": obs.get("error"),
+                    }
+                )
+                continue
+            out.append(obs)
+        return out
 
     def _propose(self, ep: Episode) -> List[dict]:
         errors = self._last_errors(ep)
@@ -298,10 +350,11 @@ class EvolutionLoop:
                 task["status"] = "failed"
                 task["result"] = None
                 task["error"] = "{}: {}".format(type(exc).__name__, exc)
+            obs_kind = "probe" if task["tool"] in approval.PROBE_TOOLS else "task_result"
             ep.observations.append(
                 {
                     "iteration": ep.iteration,
-                    "kind": "task_result",
+                    "kind": obs_kind,
                     "task_id": task["id"],
                     "tool": task["tool"],
                     "status": task["status"],

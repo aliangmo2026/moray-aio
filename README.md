@@ -42,7 +42,9 @@ E:\moray-aio\
 │   │   ├── planner.py      # 自驱任务生成（LLM 优先 / 启发式兜底）
 │   │   └── loop.py         # 主循环 Observe→Analyze→Propose→(审批)→Execute
 │   ├── tools\              # 只读工具集
-│   │   ├── log_reader.py   # tail/recent_errors/grep/check_readable（"rb" 只读）
+│   │   ├── log_reader.py   # tail/recent_errors/grep/read_rolling/check_readable（"rb" 只读）
+│   │   ├── clusterer.py    # 错误聚类：normalize + cluster（模板折叠省 token）
+│   │   ├── probes.py       # 只读系统探针：port_check/process_list/disk_usage/windows_service_status
 │   │   └── registry.py     # ToolRegistry：白名单校验 + 分发
 │   └── llm\
 │       ├── prompts.py      # ANALYZE_*/PLAN_*（只读、白名单、严格 JSON）
@@ -96,6 +98,7 @@ $env:MORAY_AIO_LOG_PATH       = "C:\temp\demo-logs\moray.err.log"
 | POST | `/episodes/{id}/tasks/reject-all` | 批量拒绝：所有 proposed 任务 |
 | POST | `/episodes/{id}/resume` | 恢复迭代：无待审批任务时执行 approved 任务并继续循环 |
 | GET | `/memory/reflections?limit=5` | 最近反思/教训记录（长效记忆，只读） |
+| GET | `/memory/similar?keywords=a,b,c` | 按关键词检索历史相似 episode（Jaccard，只读调试） |
 
 交互文档：服务启动后访问 `/docs`（Swagger UI）。
 
@@ -113,6 +116,11 @@ python scripts/demo.py
 每 2 秒轮询 GET /episodes/{id}（最多 60 次）→ phase 变成 awaiting_approval 时
 自动 approve-all（服务端只批只读白名单内的任务）+ resume → 直到 concluded/failed，
 最后打印结论与长效记忆（反思记录），一键观看 Agent 自驱分析全过程。
+
+**探针演示**（`set MORAY_AIO_DEMO_MODE=probe`）：观察 Agent 是否对
+「Connection refused 127.0.0.1:6379」自动派发 port_check / process_list 探针并打印结果。
+probe 模式需要当前工作目录存在 `moray-demo-fixture.log`（含模拟错误日志）；
+出于安全策略脚本不写文件，缺失时会打印内容与创建指引。
 
 想在本地临时日志上体验（不动 D:\MoRay）：
 
@@ -143,10 +151,35 @@ SQLite 长效记忆加了连接级锁，HTTP 线程与后台线程并发安全�
 只把 top N 类喂给 LLM——同类错误重复 1000 行不再浪费 token。聚类数上限
 `MORAY_AIO_CLUSTER_TOP_N`（默认 10）。
 
+## v0.4.0：只读系统探针 + 历史经验复用
+
+**1. 只读系统探针**（`app/tools/probes.py`，4 个工具全部只读、绝不修改系统状态）：
+- `port_check(host, port)`：TCP 端口可连性 + 延迟；host 必须命中探针白名单（默认仅环回），
+  超时/失败返回 `open=false` 不抛异常；
+- `process_list(name_pattern)`：进程列表（pid/name/内存等，上限 50 条）；
+  只读枚举，绝不 terminate/发信号；
+- `disk_usage(path)`：磁盘占用；path 受只读白名单约束；
+- `windows_service_status(service_name)`：服务状态查询（只读，绝不启停）；
+  service_name 必须匹配 `^[A-Za-z0-9_\-\s]{1,64}$`（防命令注入），subprocess 一律
+  list 形式 + shell=False，raw_output 截断 4KB；psutil 不可用时优雅降级。
+
+**2. planner 智能选工具**：错误含 `Connection refused 127.0.0.1:PORT` 时自动派
+port_check + process_list（端口→服务名推测表：6379→redis、5432→postgres 等）；
+含 disk/No space/quota 派 disk_usage；含 service/daemon 派 windows_service_status。
+非本机地址、非法 service_name、非法正则的候选一律丢弃（fail-closed）。
+
+**3. 历史相似 episode 检索**：memory 新增 episodes_index（关键词+结论），保存 episode 时
+自动提取关键词；`find_similar` 用 Jaccard 相似度找 top-k 历史案例（不依赖 embedding），
+分析时作为「历史类似案例」注入 LLM 上下文；调试可查 `GET /memory/similar`。
+
+探针执行结果以 `kind=probe` 记入 observations（进程列表注入 LLM 前会摘要为
+count + 前 3 个名字，防止撑爆上下文）。
+
 ## 版本
 
 - **v0.2.0**（tag）：MVP——Ollama 接入、自我迭代内核、批量审批、demo CLI。
 - **v0.3.0**（tag）：异步 episodes、日志滚动聚合、错误聚类，面向 MoRay 主项目 HTTP 接入就绪。
+- **v0.4.0**（tag）：只读系统探针、planner 智能派发、历史相似案例检索。
 
 ## Episode 生命周期
 

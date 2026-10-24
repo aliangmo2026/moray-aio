@@ -80,7 +80,9 @@ def test_approve_all_then_resume_concludes(env):
     ep = client.post("/episodes/sync").json()
     assert ep["phase"] == "awaiting_approval"
     proposed = [t for t in ep["tasks"] if t["status"] == "proposed"]
-    assert len(proposed) == 3  # 连接被拒/超时/文件缺失 → 启发式各提一条
+    # 连接被拒/超时/文件缺失 → 3 条 log_grep + port_check + process_list("redis")
+    assert len(proposed) == 5
+    assert {t["tool"] for t in proposed} == {"log_grep", "port_check", "process_list"}
 
     resp = client.post("/episodes/{}/tasks/approve-all".format(ep["id"]))
     assert resp.status_code == 200
