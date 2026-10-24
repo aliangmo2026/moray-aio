@@ -1,8 +1,8 @@
-"""v0.7.0 事件驱动测试：watcher 轮询、触发规则、告警推送、Watch 服务链路。"""
+"""v0.7.0 event-driven tests: watcher polling, trigger rules, alert pushers, and
+the watch service end-to-end chain."""
 
 from __future__ import annotations
 
-import dataclasses
 import threading
 import time
 from types import SimpleNamespace
@@ -50,10 +50,10 @@ def test_watcher_detects_appended_error(tmp_path):
     watcher = LogWatcher(str(log), on_lines, poll_interval=0.05)
     watcher.start()
     assert watcher.is_running()
-    time.sleep(0.2)  # 先消费初始内容
-    log.write_text("INFO start\nERROR boom-1\n", encoding="utf-8")  # 前缀不变，追加一行
+    time.sleep(0.2)  # let it consume the initial content first
+    log.write_text("INFO start\nERROR boom-1\n", encoding="utf-8")  # append one line
 
-    assert ev.wait(timeout=3.0), "watcher 未在期限内检测到新增 ERROR"
+    assert ev.wait(timeout=3.0), "watcher did not detect the new ERROR in time"
     watcher.stop()
     assert not watcher.is_running()
     assert got == ["ERROR boom-1"]
@@ -65,9 +65,9 @@ def test_watcher_handles_rotation(tmp_path):
     watcher = LogWatcher(str(log), on_lines=lambda lines: None, poll_interval=0.05)
 
     assert watcher._read_new_lines() == ["ERROR one", "ERROR two"]
-    assert watcher._read_new_lines() == []  # 无新增
+    assert watcher._read_new_lines() == []  # nothing new
 
-    # logrotate：截断为 0 后写入更短的新内容 → offset 归零重新读取
+    # logrotate: truncate to zero, then write shorter new content -> offset resets
     log.write_text("", encoding="utf-8")
     log.write_text("ERROR after-rotate\n", encoding="utf-8")
     assert watcher._read_new_lines() == ["ERROR after-rotate"]
@@ -89,7 +89,7 @@ def test_trigger_rapid_burst(monkeypatch):
     for i in range(4):
         assert engine.feed("ERROR boom") is None
         fake["now"] += 5
-    fired = engine.feed("ERROR boom")  # 60s 窗口内第 5 条
+    fired = engine.feed("ERROR boom")  # the 5th hit inside the 60s window
     assert fired is not None and fired.name == "rapid_error_burst"
     assert engine.fire_count["rapid_error_burst"] == 1
 
@@ -97,16 +97,17 @@ def test_trigger_rapid_burst(monkeypatch):
 def test_trigger_cooldown(monkeypatch):
     fake = _frozen_clock(monkeypatch)
     engine = TriggerEngine([RAPID_RULE])
+    fired = None
     for i in range(5):
         fired = engine.feed("ERROR boom")
-    assert fired is not None  # 第 5 条触发
+    assert fired is not None  # the 5th line fires
 
-    # 冷却期（300s）内：再攒满 5 条也不触发
+    # inside the 300s cooldown: even 5 fresh hits never fire
     for i in range(5):
         assert engine.feed("ERROR boom") is None
         fake["now"] += 1
 
-    # 冷却结束后重新计数可再触发
+    # after the cooldown, counting restarts and can fire again
     fake["now"] += 400
     for i in range(5):
         fired = engine.feed("ERROR boom")
@@ -119,17 +120,17 @@ def test_trigger_critical_keyword(monkeypatch):
     engine = TriggerEngine([CRITICAL_RULE])
     fired = engine.feed("2026-10-24 ERROR Connection refused to redis")
     assert fired is not None and fired.name == "critical_keywords"
-    # 冷却 120s 内不再触发
+    # within the 120s cooldown it never fires again
     assert engine.feed("panic: OOM killer") is None
 
 
 def test_trigger_error_spike(monkeypatch):
     fake = _frozen_clock(monkeypatch)
     engine = TriggerEngine([SPIKE_RULE])
-    # 前一窗口 2 条
+    # 2 hits in the previous window
     assert engine.feed("ERROR a") is None
     assert engine.feed("ERROR b") is None
-    # 下一窗口突增：达到 3 倍即触发（2 x 3 = 6）
+    # next window surge: fires at 3x (2 x 3 = 6)
     fake["now"] += 70
     fired = None
     for i in range(6):
@@ -196,19 +197,19 @@ def test_notifier_webhook_success(monkeypatch):
     assert captured["json"]["title"] == "[moray-aio] warning | rapid_error_burst"
     assert "line1" in captured["json"]["content"]
     assert captured["json"]["severity"] == "warning"
-    assert captured["follow_redirects"] is False  # 禁用重定向
+    assert captured["follow_redirects"] is False  # redirects disabled
 
 
 def test_notifier_webhook_blocks_private_targets(monkeypatch):
     _stub_dns(monkeypatch)
-    # 环回/私有/保留地址与白名单外域名一律拒绝（fail-closed）
+    # loopback / private / reserved addresses and off-allowlist domains are rejected
     for bad in ("http://127.0.0.1:8080/x", "http://10.0.0.5/x", "http://169.254.169.254/latest"):
         with pytest.raises(ValueError):
             nt.WebhookNotifier(bad, {"hooks.example.com"}).notify("t", "c")
     with pytest.raises(ValueError):
         nt.WebhookNotifier("https://evil.example.org/x", {"hooks.example.com"}).notify("t", "c")
     with pytest.raises(ValueError):
-        nt.WebhookNotifier("https://hooks.example.com/x", set()).notify("t", "c")  # 空白名单
+        nt.WebhookNotifier("https://hooks.example.com/x", set()).notify("t", "c")  # empty allowlist
 
 
 def test_notifier_isolation():
@@ -216,11 +217,11 @@ def test_notifier_isolation():
     group = nt.NotifierGroup([_BoomNotifier(), recorder])
     assert group.notify("title-x", "content-x", "critical") is True
     assert recorder.calls == [("title-x", "content-x", "critical")]
-    # 全部失败 → 返回 False 但不抛异常
+    # everything failing -> returns False without raising
     assert nt.NotifierGroup([_BoomNotifier()]).notify("t", "c") is False
 
 
-# ---------- WatchService 端到端 ----------
+# ---------- WatchService end-to-end ----------
 
 class _FakeLoop:
     def __init__(self, episode):
@@ -238,7 +239,7 @@ class _FakeLoop:
 def test_watch_service_end_to_end(tmp_path):
     log = tmp_path / "w.log"
     log.write_text("INFO boot\n", encoding="utf-8")
-    episode = SimpleNamespace(phase=Phase.CONCLUDED, conclusion="建议检查 Redis", error=None)
+    episode = SimpleNamespace(phase=Phase.CONCLUDED, conclusion="Check the redis service", error=None)
     loop = _FakeLoop(episode)
     recorder = _RecordingNotifier()
     watcher = LogWatcher(str(log), on_lines=lambda lines: None, poll_interval=0.05)
@@ -252,14 +253,14 @@ def test_watch_service_end_to_end(tmp_path):
     )
 
     service.feed_lines(["ERROR Connection refused to redis 127.0.0.1:6379"])
-    assert loop.started == ["watch:critical_keywords"]  # 触发即自驱分析
+    assert loop.started == ["watch:critical_keywords"]  # fired -> self-driven analysis
 
-    service.tick()  # episode 已 concluded → 推送告警
+    service.tick()  # episode already concluded -> push the alert
     assert len(recorder.calls) == 1
     title, content, severity = recorder.calls[0]
     assert title == "[moray-aio] critical | critical_keywords"
     assert "Connection refused" in content
-    assert "建议检查 Redis" in content
+    assert "Check the redis service" in content
     assert severity == "critical"
     assert service.status()["notifications_sent"] == 1
 

@@ -1,13 +1,15 @@
-"""告警推送器：把「值得人类知道」的事件推送到终端 / Webhook / 本地文件。
+"""Alert pushers: deliver "worth knowing" events to console / webhook / local file.
 
-硬约束：
-- Webhook URL 仅允许 http/https，且 host 必须命中运维显式配置的域名白名单；
-  每次请求前校验协议/host/白名单，并解析域名校验每个地址都是全局地址
-  （拒绝 localhost、环回、私有和保留地址，防 DNS rebinding）；禁用重定向；
-- 密钥/凭据只从环境变量读取（webhook URL/白名单本身来自 Settings/环境变量）；
-- FileNotifier 只追加写自己的 alerts 文件（默认 data/alerts.log），
-  绝不碰被监控的日志；
-- 多 Notifier 扇出互相隔离：单个失败只记录日志，不影响其他。
+Hard rules:
+- Webhook URLs are http/https only, and the host must hit an operator-configured
+  domain allowlist; every request re-validates protocol/host/allowlist, resolves the
+  domain and requires every resolved address to be global (rejecting localhost,
+  loopback, private and reserved addresses — DNS-rebinding aware); redirects disabled;
+- Credentials come from environment variables only (webhook URL/allowlist come from
+  Settings / environment);
+- FileNotifier appends ONLY to its own alerts file (default data/alerts.log) —
+  it never touches watched logs;
+- Fan-out across notifiers is isolated: one failure is logged and never affects others.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import socket
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from urllib.parse import urlsplit
 
 import httpx
@@ -29,7 +31,8 @@ _ALLOWED_SCHEMES = ("http", "https")
 
 
 def _assert_global_addresses(host: str) -> None:
-    """解析并校验地址边界：literal IP 与域名解析出的每个地址都必须 is_global。"""
+    """Resolve and validate address boundaries: literal IPs and every resolved
+    address must be globally routable."""
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
@@ -57,7 +60,7 @@ def _assert_global_addresses(host: str) -> None:
 
 
 def parse_allowed_hosts(raw: str) -> frozenset:
-    """解析域名白名单（分号/逗号分隔）；空 → 空集（fail-closed）。"""
+    """Parse the domain allowlist (semicolon/comma separated); empty -> empty set (fail-closed)."""
     hosts = set()
     for chunk in str(raw or "").replace(",", ";").split(";"):
         item = chunk.strip().lower()
@@ -67,15 +70,15 @@ def parse_allowed_hosts(raw: str) -> frozenset:
 
 
 class BaseNotifier(ABC):
-    """告警推送接口。返回 True 表示本次推送成功。"""
+    """Alert push interface. Returns True when this push succeeded."""
 
     @abstractmethod
     def notify(self, title: str, content: str, severity: str = "warning") -> bool:
-        """推送一条告警。"""
+        """Push one alert."""
 
 
 class ConsoleNotifier(BaseNotifier):
-    """打印到终端（默认）。"""
+    """Print to the terminal (default)."""
 
     def notify(self, title: str, content: str, severity: str = "warning") -> bool:
         print("[{}] {}\n{}".format(severity, title, content))
@@ -83,12 +86,19 @@ class ConsoleNotifier(BaseNotifier):
 
 
 class WebhookNotifier(BaseNotifier):
-    """POST 到 Webhook（钉钉/飞书/Slack 通用 JSON；支持自定义 body 模板）。
+    """POST to a webhook (DingTalk/Feishu/Slack-compatible JSON; custom body template).
 
-    allowed_hosts 为运维配置的域名白名单；空集时本推送器拒绝工作（fail-closed）。
+    ``allowed_hosts`` is the operator-configured domain allowlist; an empty allowlist
+    makes this pusher refuse to work (fail-closed).
     """
 
-    def __init__(self, url: str, allowed_hosts, template: Optional[str] = None, timeout: float = 10.0):
+    def __init__(
+        self,
+        url: str,
+        allowed_hosts,
+        template: Optional[str] = None,
+        timeout: float = 10.0,
+    ):
         self.url = str(url)
         self.allowed_hosts = frozenset(h.strip().lower() for h in (allowed_hosts or ()) if h)
         self.template = template
@@ -108,7 +118,7 @@ class WebhookNotifier(BaseNotifier):
         else:
             body = {"title": title, "content": content, "severity": severity}
 
-        # ---- 请求前边界校验（协议 + 域名白名单 + 地址解析边界）----
+        # ---- pre-request boundary validation (protocol + domain allowlist + resolution) ----
         parts = urlsplit(str(self.url).strip())
         scheme = (parts.scheme or "").lower()
         host = (parts.hostname or "").lower()
@@ -120,7 +130,7 @@ class WebhookNotifier(BaseNotifier):
             raise ValueError(
                 "webhook_url host {!r} is not in the allowed hosts whitelist".format(host)
             )
-        _assert_global_addresses(host)  # 解析并阻断私网/环回/链路本地（防 DNS rebinding）
+        _assert_global_addresses(host)  # resolve & block loopback/private/reserved (DNS-rebinding aware)
         target = parts.geturl()
 
         resp = httpx.post(target, json=body, timeout=self.timeout, follow_redirects=False)
@@ -128,7 +138,7 @@ class WebhookNotifier(BaseNotifier):
 
 
 class FileNotifier(BaseNotifier):
-    """追加写入本地 alerts 文件（唯一允许的写文件：自己的告警日志）。"""
+    """Append to a local alerts file (the only file this project ever writes)."""
 
     def __init__(self, path: str):
         candidate = Path(str(path))
@@ -149,7 +159,7 @@ class FileNotifier(BaseNotifier):
 
 
 class NotifierGroup(BaseNotifier):
-    """扇出多个 Notifier；单个失败只记日志，不影响其他（隔离）。"""
+    """Fan out to multiple notifiers; one failure is logged and never affects others."""
 
     def __init__(self, notifiers: List[BaseNotifier]):
         self.notifiers: List[BaseNotifier] = list(notifiers)
@@ -166,7 +176,7 @@ class NotifierGroup(BaseNotifier):
 
 
 def _json_safe(text: str) -> str:
-    """把文本安全嵌入 JSON 字符串字面量（模板替换用）。"""
+    """Embed text safely inside a JSON string literal (for template replacement)."""
     return (
         str(text)
         .replace("\\", "\\\\")
@@ -178,7 +188,7 @@ def _json_safe(text: str) -> str:
 
 
 def build_notifiers(settings) -> NotifierGroup:
-    """按 Settings 组装 Notifier 组合（console;webhook;file，分号分隔）。"""
+    """Assemble the notifier group from Settings (console;webhook;file)."""
     notifiers: List[BaseNotifier] = []
     seen = set()
     for raw in str(getattr(settings, "notifier_types_raw", "console") or "console").split(";"):
@@ -209,5 +219,5 @@ def build_notifiers(settings) -> NotifierGroup:
         else:
             logger.warning("unknown notifier type skipped: %r", kind)
     if not notifiers:
-        notifiers.append(ConsoleNotifier())  # 至少保留终端，保证告警不丢
+        notifiers.append(ConsoleNotifier())  # keep at least the terminal so alerts are never lost
     return NotifierGroup(notifiers)

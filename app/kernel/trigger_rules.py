@@ -1,11 +1,11 @@
-"""触发器规则引擎：决定「什么时候值得唤醒 Agent 做一次分析」。
+"""Trigger rule engine: decides when an error stream is worth waking the agent up.
 
-规则语义：
-- rapid_error_burst：window_seconds 内命中 >= threshold 条 → 触发；
-- critical_keywords：命中 pattern（单次即触发，threshold=1）；
-- error_spike：最近 window_seconds 的命中数 >= threshold x 前一个窗口（突增检测）。
-所有规则共享冷却机制：cooldown_seconds 内重复命中一律返回 None。
-时间源 time.time() 可被 monkeypatch（now 参数亦可显式注入）。
+Rule semantics:
+- rapid_error_burst: >= threshold hits within window_seconds -> fire;
+- critical_keywords: pattern hit fires immediately (threshold=1);
+- error_spike: hits in the last window >= threshold x the previous window (surge).
+All rules share cooldowns: hits inside cooldown_seconds never fire again.
+The time source time.time() can be monkeypatched (or pass ``now`` explicitly).
 """
 
 from __future__ import annotations
@@ -52,9 +52,9 @@ DEFAULT_RULES: Tuple[Rule, ...] = (
 
 
 class TriggerEngine:
-    """喂入日志行，命中规则（且不在冷却期）时返回该规则。"""
+    """Feed log lines in; returns the fired rule (None while cooling down)."""
 
-    def __init__(self, rules=None, max_hits_memory: int = 500):
+    def __init__(self, rules: Optional[List[Rule]] = None, max_hits_memory: int = 500):
         self.rules: List[Rule] = list(rules or DEFAULT_RULES)
         self._compiled = {r.name: re.compile(r.pattern) for r in self.rules}
         self._hits: Dict[str, Deque[Tuple[float, str]]] = {
@@ -65,20 +65,22 @@ class TriggerEngine:
         self.fire_count: Dict[str, int] = {r.name: 0 for r in self.rules}
 
     def feed(self, line: str, now: Optional[float] = None) -> Optional[Rule]:
+        """Feed one line; returns the fired rule, or None when nothing fires."""
         now = time.time() if now is None else float(now)
         for rule in self.rules:
             if not self._compiled[rule.name].search(str(line)):
                 continue
             self._hits[rule.name].append((now, str(line)))
             if now < self._cooldown_until.get(rule.name, 0.0):
-                continue  # 冷却期内：只记录，不触发
+                continue  # inside cooldown: record but never fire
             if not self._should_fire(rule, now):
                 continue
             self._cooldown_until[rule.name] = now + float(rule.cooldown_seconds)
             self._last_fired_at[rule.name] = now
             self.fire_count[rule.name] += 1
-            # 不清空命中缓存：recent_hits 需要它做告警证据；
-            # 重新计数靠时间窗自然过期（cooldown 远大于 window）
+            # Hits are intentionally NOT cleared: recent_hits needs them as alert
+            # evidence; re-arming relies on the time window expiring naturally
+            # (cooldown is always much larger than window).
             return rule
         return None
 
@@ -95,14 +97,15 @@ class TriggerEngine:
         return recent >= max(1, rule.threshold)
 
     def recent_hits(self, rule_name: str, limit: int = 5) -> List[str]:
-        """该规则最近命中的原始日志行（告警正文用）。"""
+        """Recent raw log lines matched by the rule (alert body evidence)."""
         hits = self._hits.get(rule_name)
         if not hits:
             return []
         return [line for _t, line in list(hits)[-max(1, int(limit)):]]
 
     def status(self) -> dict:
-        out = {}
+        """Per-rule snapshot for /watch/status."""
+        out: Dict[str, dict] = {}
         for rule in self.rules:
             out[rule.name] = {
                 "pattern": rule.pattern,
@@ -118,10 +121,10 @@ class TriggerEngine:
 
 
 def parse_rules_config(config_json: str) -> List[Rule]:
-    """解析 MORAY_AIO_WATCH_RULES_CONFIG（JSON 数组）；空串返回默认规则。
+    """Parse MORAY_AIO_WATCH_RULES_CONFIG (JSON array); empty string -> default rules.
 
-    每项形如 {"name","pattern","threshold","window_seconds","cooldown_seconds"}；
-    非法 JSON / 非法正则 / 缺 name 一律抛 ValueError（fail-closed）。
+    Each item: {"name","pattern","threshold","window_seconds","cooldown_seconds"}.
+    Invalid JSON / invalid regex / missing name raise ValueError (fail-closed).
     """
     text = (config_json or "").strip()
     if not text:
@@ -135,7 +138,7 @@ def parse_rules_config(config_json: str) -> List[Rule]:
     if not isinstance(items, list) or not items:
         raise ValueError("watch_rules_config must be a non-empty JSON array")
     rules: List[Rule] = []
-    seen = set()
+    seen: set = set()
     for item in items:
         if not isinstance(item, dict):
             raise ValueError("watch_rules_config items must be objects")

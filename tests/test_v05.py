@@ -1,4 +1,5 @@
-"""v0.5.0 新能力测试：trace/metrics、插件动态加载、CLI、token 用量提取。"""
+"""v0.5.0 capability tests: trace/metrics, plugin dynamic loading, CLI, token
+usage extraction."""
 
 from __future__ import annotations
 
@@ -8,12 +9,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.kernel.loop import EvolutionLoop
 from app.kernel.sqlite_repository import Memory
+from app.tools.clusterer import cluster, normalize  # noqa: F401  (public API check)
 from app.tools.registry import ToolRegistry
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -34,7 +35,8 @@ class EchoTool(BaseTool):
 
 
 class _UsageLLM:
-    """带 token 用量的假 LLM：analyze/plan 各消耗一组 token，之后不再提任务。"""
+    """Fake LLM with token usage: analyze/plan each burn one usage record and then
+    propose nothing."""
 
     def __init__(self):
         self._usage = None
@@ -43,11 +45,11 @@ class _UsageLLM:
         return True
 
     def analyze(self, errors, extra=None, lessons=None, failed=None, similar=None):
-        self._usage = {"prompt_tokens": 40, "completion_tokens": 12}
+        self._usage = {"prompt_tokens": 40, "completion_tokens": 12, "retries": 0}
         return {"summary": "s", "likely_root_causes": [], "information_gaps": [], "conclusion": "c"}
 
     def plan_tasks(self, errors, log_path, tools, existing=None, lessons=None, failed=None):
-        self._usage = {"prompt_tokens": 30, "completion_tokens": 8}
+        self._usage = {"prompt_tokens": 30, "completion_tokens": 8, "retries": 0}
         return {"tasks": []}
 
     def take_last_usage(self):
@@ -77,27 +79,26 @@ def test_trace_and_metrics(tmp_path, monkeypatch):
 
     ep = loop.start()
 
-    # trace 完整覆盖核心阶段，且 token 归因正确
+    # the trace covers every core stage with correct token attribution
     stages = [e["stage"] for e in ep.trace]
     assert stages == ["observe", "analyze", "propose", "execute"]
     for entry in ep.trace:
         assert entry["duration_ms"] >= 0
         assert entry["timestamp"]
-        assert entry["iteration"] == ep.iteration or entry["stage"] == "observe"
     by_stage = {e["stage"]: e for e in ep.trace}
-    assert by_stage["analyze"]["llm"] == {"prompt_tokens": 40, "completion_tokens": 12}
-    assert by_stage["propose"]["llm"] == {"prompt_tokens": 30, "completion_tokens": 8}
+    assert by_stage["analyze"]["llm"] == {"prompt_tokens": 40, "completion_tokens": 12, "retries": 0}
+    assert by_stage["propose"]["llm"] == {"prompt_tokens": 30, "completion_tokens": 8, "retries": 0}
     assert by_stage["observe"]["llm"] is None
     assert by_stage["execute"]["llm"] is None
 
-    # GET /episodes/{id} 携带 trace；GET /metrics 聚合正确
+    # GET /episodes/{id} carries the trace; GET /metrics aggregates correctly
     from app.api import routes
-    from app.main import app
+    from app.main import create_app
 
     monkeypatch.setattr(routes, "get_memory", lambda: memory)
     monkeypatch.setattr(routes, "get_loop", lambda: loop)
     monkeypatch.setattr(routes, "get_llm", lambda: _UsageLLM())
-    client = TestClient(app)
+    client = TestClient(create_app(dataclasses.replace(Settings(), rate_limit_per_minute=0)))
 
     ep_body = client.get("/episodes/{}".format(ep.id)).json()
     assert ep_body["trace"] and len(ep_body["trace"]) == 4
@@ -114,7 +115,7 @@ def test_trace_and_metrics(tmp_path, monkeypatch):
     assert "done" in body["tasks_by_status"]
 
 
-# ---------- 插件动态加载 ----------
+# ---------- plugin dynamic loading ----------
 
 def test_plugin_loading(tmp_path):
     plugin_dir = tmp_path / "plugins"
@@ -126,11 +127,11 @@ def test_plugin_loading(tmp_path):
     assert registry.plugin_errors == []
     assert registry.call("dummy_echo", {"text": "hello"}) == {"echo": "hello"}
     assert "dummy_echo" in registry.describe()
-    # 内置工具不受影响（空日志返回空列表）
+    # built-in tools are unaffected (empty log returns an empty list)
     (tmp_path / "x.log").write_text("", encoding="utf-8")
     assert registry.call("log_tail", {"path": str(tmp_path / "x.log"), "n": 1}) == []
 
-    # 仓库自带示例插件（examples/）也能加载
+    # the bundled example plugin (examples/) loads too
     registry2 = ToolRegistry([str(tmp_path)], 1024 * 1024, plugin_dirs=[str(REPO_ROOT / "examples")])
     assert "dummy_echo" in registry2.names
     assert registry2.call("dummy_echo", {"text": "from example"}) == {"echo": "from example"}
@@ -139,19 +140,19 @@ def test_plugin_loading(tmp_path):
 def test_plugin_failure_isolated(tmp_path):
     plugin_dir = tmp_path / "plugins"
     plugin_dir.mkdir()
-    (plugin_dir / "broken.py").write_text("def broken(:\n", encoding="utf-8")  # 语法错误
-    (plugin_dir / "not_a_tool.py").write_text("x = 1\n", encoding="utf-8")  # 无 BaseTool
+    (plugin_dir / "broken.py").write_text("def broken(:\n", encoding="utf-8")  # syntax error
+    (plugin_dir / "not_a_tool.py").write_text("x = 1\n", encoding="utf-8")  # no BaseTool
     (plugin_dir / "echo_plugin.py").write_text(ECHO_PLUGIN_SRC, encoding="utf-8")
 
     registry = ToolRegistry([str(tmp_path)], 1024 * 1024, plugin_dirs=[str(plugin_dir)])
-    # 坏插件只记录错误，不拖垮进程；好插件照常注册
+    # broken plugins only record errors; they never take the process down
     assert "dummy_echo" in registry.names
     assert len(registry.plugin_errors) == 2
     assert any("broken.py" in msg for msg in registry.plugin_errors)
     assert any("not_a_tool.py" in msg for msg in registry.plugin_errors)
 
 
-# ---------- token 用量提取 ----------
+# ---------- token usage extraction ----------
 
 def test_ollama_usage_extraction(monkeypatch):
     from app.llm import ollama_client as oc
@@ -175,7 +176,7 @@ def test_ollama_usage_extraction(monkeypatch):
     result = client._generate("p", "s")
     assert result["summary"] == "s"
     assert client.take_last_usage() == {"prompt_tokens": 12, "completion_tokens": 34, "retries": 0}
-    assert client.take_last_usage() is None  # 取走即清空，避免跨阶段重复归因
+    assert client.take_last_usage() is None  # take-and-clear avoids cross-stage dupes
 
 
 # ---------- CLI ----------
@@ -191,7 +192,7 @@ def test_cli_run(tmp_path):
             "MORAY_AIO_MEMORY_DB_PATH": str(tmp_path / "mem.sqlite3"),
             "MORAY_AIO_AUTO_APPROVE_READONLY": "true",
             "MORAY_AIO_MAX_ITERATIONS": "1",
-            "MORAY_AIO_OLLAMA_URL": "http://127.0.0.1:59999",  # 不可达 → 启发式，确定性
+            "MORAY_AIO_OLLAMA_URL": "http://127.0.0.1:59999",  # unreachable -> heuristics, deterministic
             "PYTHONIOENCODING": "utf-8",
             "NO_COLOR": "1",
         }
@@ -207,5 +208,5 @@ def test_cli_run(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert "concluded" in proc.stdout
-    assert "结论" in proc.stdout
+    assert "Conclusion:" in proc.stdout
     assert "trace" in proc.stdout

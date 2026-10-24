@@ -1,4 +1,5 @@
-"""可视化控制台：单页 HTML + 聚合数据接口（极客风、高信息密度、零构建依赖）。"""
+"""Visualization console: single-page HTML + aggregated data endpoint
+(geek-styled, information-dense, zero build-step dependencies)."""
 
 from __future__ import annotations
 
@@ -17,13 +18,14 @@ _TEMPLATE = Path(__file__).resolve().parent.parent / "templates" / "dashboard.ht
 
 @dashboard_router.get("/dashboard", response_class=HTMLResponse)
 def dashboard_page():
-    """单页控制台（Alpine.js + Tailwind CDN，暗色高密度）。"""
+    """Single-page console (Alpine.js + Tailwind via CDN, dark, high density)."""
     return HTMLResponse(_TEMPLATE.read_text(encoding="utf-8"))
 
 
 @dashboard_router.get("/api/dashboard/data")
 def dashboard_data():
-    """聚合数据：全局 metrics + 最近 20 个 episode（含 trace）+ watch 状态。"""
+    """Aggregated data: global metrics + the 20 most recent episodes (with trace)
+    + watch status."""
     memory = get_memory()
     loop = get_loop()
     episodes = []

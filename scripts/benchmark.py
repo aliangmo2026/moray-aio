@@ -1,11 +1,12 @@
-"""moray-aio 硬核压测：日志读取 / 错误聚类 / 并发启发式分析。
+"""moray-aio hard benchmark: log reading / error clustering / concurrent heuristic analysis.
 
-用法：
+Usage:
     python scripts/benchmark.py [--size-mb 100] [--workers 20] [--ops 10]
                                 [--out docs/benchmark.md]
 
-产出：终端表格 + docs/benchmark.md。被压测数据写在 data/benchmark/（已 gitignore）。
-全程只写自己的压测数据与报告，不碰任何被监控日志。
+Output: a terminal table plus docs/benchmark.md. Benchmark data lives in
+data/benchmark/ (gitignored). This script only writes its own benchmark data and
+report — it never touches watched logs.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ NOISE_TEMPLATE = "2026-10-24 {h:02d}:{m:02d}:{s:02d} INFO job tick ok seq={n}"
 
 
 def generate_log(size_mb: int) -> Path:
-    """生成约 size_mb 的模拟日志（3 类 ERROR 模板 + INFO 噪声，逐块写入）。"""
+    """Generate a ~size_mb simulated log (3 ERROR templates + INFO noise, chunked writes)."""
     BENCH_DIR.mkdir(parents=True, exist_ok=True)
     path = BENCH_DIR / "moray.err.log"
     target_bytes = size_mb * 1024 * 1024
@@ -77,9 +78,9 @@ def _timed(fn):
 
 
 def _analysis_op(lines, tools, log_path):
-    """一次「分析内核」操作：聚类 + 启发式归因 + 任务规划（无 LLM）。"""
+    """One "analysis kernel" operation: clustering + heuristic attribution + planning (no LLM)."""
     clusters = clusterer.cluster(lines, top_n=10)
-    formatted = ["[x{}] {} | 样本: {}".format(c["count"], c["template"], c["sample_line"])
+    formatted = ["[x{}] {} | sample: {}".format(c["count"], c["template"], c["sample_line"])
                  for c in clusters]
     analysis = EvolutionLoop._heuristic_analysis(formatted)
     tasks = propose_tasks(
@@ -93,13 +94,13 @@ def run_benchmark(size_mb: int, workers: int, ops: int) -> dict:
     results = {"env": {"python": platform.python_version(), "platform": platform.platform()}}
 
     print("== moray-aio benchmark ==")
-    print("[1/4] 生成 {:.0f}MB 模拟日志 ...".format(size_mb))
+    print("[1/4] generating a {:.0f}MB simulated log ...".format(size_mb))
     log_path, gen_time, _ = _timed(lambda: generate_log(size_mb))
     size_actual = log_path.stat().st_size / 1024 / 1024
     results["generate"] = {"seconds": round(gen_time, 2), "size_mb": round(size_actual, 2)}
     print("      done: {:.1f}MB in {:.2f}s".format(size_actual, gen_time))
 
-    print("[2/4] read_rolling 全量扫描 ...")
+    print("[2/4] read_rolling full scan ...")
     lines, read_time, read_peak = _timed(
         lambda: read_rolling(
             BENCH_DIR, "moray.err.log*", n=2 ** 31 - 1,
@@ -115,7 +116,7 @@ def run_benchmark(size_mb: int, workers: int, ops: int) -> dict:
         len(lines), read_time, results["read_rolling"]["throughput_mb_per_s"],
         results["read_rolling"]["peak_mb"]))
 
-    print("[3/4] cluster 聚类 ...")
+    print("[3/4] clustering ...")
     clusters, cluster_time, cluster_peak = _timed(lambda: clusterer.cluster(lines, top_n=10))
     results["cluster"] = {
         "classes": len(clusters), "seconds": round(cluster_time, 3),
@@ -127,7 +128,7 @@ def run_benchmark(size_mb: int, workers: int, ops: int) -> dict:
         len(lines), len(clusters), cluster_time,
         results["cluster"]["lines_per_s"], results["cluster"]["peak_mb"]))
 
-    print("[4/4] 并发启发式分析 ({} workers x {} ops) ...".format(workers, ops))
+    print("[4/4] concurrent heuristic analysis ({} workers x {} ops) ...".format(workers, ops))
     sample = lines[-50:] or ["ERROR sample"]
     tools = ToolRegistry([str(BENCH_DIR)], 64 * 1024 * 1024)
     total_ops = workers * ops
@@ -159,36 +160,39 @@ def render_report(results: dict) -> str:
     )
     return """# moray-aio Benchmark
 
-> 由 `python scripts/benchmark.py` 自动生成。数据文件在 `data/benchmark/`（不入库）。
+> Generated automatically by `python scripts/benchmark.py`. Data files live in
+> `data/benchmark/` (gitignored).
 
-## 环境
+## Environment
 
-| 项 | 值 |
+| Item | Value |
 | --- | --- |
 | Python | {python} |
 | Platform | {platform} |
 
-## 结果
+## Results
 
-| 项目 | 指标 |
+| Item | Metric |
 | --- | --- |
-| 生成 {gen_mb}MB 日志 | {gen_s}s |
-| read_rolling 全量扫描 | {read_lines} 行 / {read_s}s / **{read_tp} MB/s** / 峰值内存 {read_mem}MB |
-| cluster 聚类 | {cl_lines} 行 -> **{cl_classes} 类** / {cl_s}s / {cl_lps} lines/s / 峰值内存 {cl_mem}MB |
-| 并发启发式分析 | {workers} workers x {ops} ops / {conc_s}s / **{qps} QPS**（无 LLM，聚类+归因+规划全链路） |
+| Generated {gen_mb}MB log | {gen_s}s |
+| read_rolling full scan | {read_lines} lines / {read_s}s / **{read_tp} MB/s** / peak mem {read_mem}MB |
+| cluster | {cl_lines} lines -> **{cl_classes} classes** / {cl_s}s / {cl_lps} lines/s / peak mem {cl_mem}MB |
+| Concurrent heuristic analysis | {workers} workers x {ops} ops / {conc_s}s / **{qps} QPS** (no LLM: cluster + attribution + planning) |
 
-## 聚类 top 模板
+## Top cluster templates
 
-| 模板 | 命中数 |
+| Template | Count |
 | --- | --- |
 {top_rows}
 
-## 备注
+## Notes
 
-- read_rolling/cluster 覆盖全量 {gen_mb}MB（max_scan_bytes 放开），反映最坏情况吞吐；
-- 并发压测直接调用分析内核（cluster + heuristic analysis + propose_tasks），
-  不含 HTTP 与 LLM 延迟，度量的是纯 Python 内核的并发天花板；
-- 结果随机器浮动，CI 中不设硬性阈值。
+- read_rolling/cluster cover the full {gen_mb}MB (max_scan_bytes opened up), reflecting
+  worst-case throughput;
+- the concurrency benchmark calls the analysis kernel directly (cluster + heuristic
+  analysis + propose_tasks), excluding HTTP and LLM latency — it measures the pure
+  Python kernel concurrency ceiling;
+- numbers vary by machine; CI sets no hard thresholds.
 """.format(
         python=env["python"], platform=env["platform"],
         gen_mb=gen["size_mb"], gen_s=gen["seconds"],
@@ -215,7 +219,7 @@ def main() -> int:
     out_path = REPO_ROOT / args.out
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(report, encoding="utf-8")
-    print("\n报告已写入 {}".format(out_path))
+    print("\nReport written to {}".format(out_path))
     return 0
 
 

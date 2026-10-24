@@ -1,17 +1,21 @@
-"""Ollama 本地大模型客户端。
+"""Ollama local-LLM client.
 
-MVP 阶段只留接口：Ollama 未启动 / 请求失败 / 输出解析失败时，
-上层（loop/planner）自动回落启发式，服务本身不依赖 Ollama 存活。
+Interface-first by design: when Ollama is down / requests fail / output cannot be
+parsed, the upper layers (loop/planner) automatically fall back to heuristics —
+the service never depends on Ollama being alive.
 
-SSRF 防护（fail-closed）：
-- base_url 只接受 http/https 且必须 origin-only（无路径/凭据/query/fragment）；
-- 主机必须命中运维显式配置的白名单（默认仅环回：127.0.0.1 / localhost / ::1，
-  可用环境变量 MORAY_AIO_OLLAMA_ALLOWED_HOSTS 完全替换）——本产品定位就是
-  连接运维自己部署的本地 LLM，白名单即「发请求前校验 host」的实现；
-- 请求 URL 只由「校验过的 origin + 固定路径常量」拼出，任何外部输入不进入 URL。
+SSRF protection (fail-closed):
+- base_url must be http/https and origin-only (no path/credentials/query/fragment);
+- the host must hit an operator-configured whitelist (loopback only by default:
+  127.0.0.1 / localhost / ::1, fully replaceable via MORAY_AIO_OLLAMA_ALLOWED_HOSTS)
+  — this product's purpose is to reach the operator's own local LLM, and the
+  whitelist implements "validate the host before every request";
+- request URLs are always "validated origin + fixed path constants"; no external
+  input ever flows into the URL.
 
-网络弹性：POST 带指数退避重试（1s/2s/4s，最多 3 次），仅针对网络超时/连接错误/5xx；
-4xx（如 400）不重试直接抛出。重试次数记录进 token 用量（trace 可见）。
+Network resilience: POSTs retry with exponential backoff (1s/2s/4s, at most 3
+retries) for timeouts/connection errors/5xx; 4xx (e.g. 400) raises immediately
+without retry. The retry count is recorded in the token usage (visible in trace).
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import logging
 import re
 import threading
 import time
-from typing import FrozenSet, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 import httpx
@@ -33,16 +37,16 @@ logger = logging.getLogger("moray_aio.ollama")
 ALLOWED_SCHEMES: FrozenSet[str] = frozenset({"http", "https"})
 DEFAULT_ALLOWED_HOSTS: FrozenSet[str] = frozenset({"127.0.0.1", "localhost", "::1"})
 
-# 固定路径常量：请求 URL = 校验过的 origin + 这两个常量之一
+# Fixed path constants: request URL = validated origin + one of these
 _TAGS_PATH = "/api/tags"
 _GENERATE_PATH = "/api/generate"
 
-# 指数退避：最多重试 3 次，间隔 1s / 2s / 4s
+# Exponential backoff: at most 3 retries, 1s / 2s / 4s
 RETRY_DELAYS: Tuple[float, ...] = (1.0, 2.0, 4.0)
 
 
 def _validate_origin(base_url: str) -> Tuple[str, str, Optional[int]]:
-    """校验并拆出 (scheme, host, port)；任何不合形抛 ValueError。"""
+    """Validate and split (scheme, host, port); anything malformed raises ValueError."""
     parts = urlsplit(str(base_url).strip())
     scheme = (parts.scheme or "").lower()
     if scheme not in ALLOWED_SCHEMES:
@@ -64,30 +68,40 @@ def _validate_origin(base_url: str) -> Tuple[str, str, Optional[int]]:
 
 
 class OllamaClient:
+    """Thin client over the Ollama REST API with usage tracking and retries."""
+
     def __init__(self, base_url: str, model: str, timeout: int = 120, allowed_hosts=None):
         scheme, host, port = _validate_origin(base_url)
-        whitelist = frozenset(h.strip().lower() for h in (allowed_hosts or DEFAULT_ALLOWED_HOSTS) if h)
+        whitelist = frozenset(
+            h.strip().lower() for h in (allowed_hosts or DEFAULT_ALLOWED_HOSTS) if h
+        )
         if host.lower() not in whitelist:
             raise ValueError(
-                "ollama host {!r} is not in the allowed hosts whitelist {}".format(host, sorted(whitelist))
+                "ollama host {!r} is not in the allowed hosts whitelist {}".format(
+                    host, sorted(whitelist)
+                )
             )
         self._origin = "{}://{}{}".format(
-            scheme, ("[{}]".format(host) if ":" in host else host), (":{}".format(port) if port else "")
+            scheme,
+            ("[{}]".format(host) if ":" in host else host),
+            (":{}".format(port) if port else ""),
         )
         self.model = model
         self.timeout = int(timeout)
         self._available: Optional[bool] = None
-        # Token/重试用量按线程隔离：后台线程池并发跑 episode，避免互相覆盖
+        # Token/retry usage is thread-local: background workers run episodes
+        # concurrently and must not overwrite each other's attribution
         self._tls = threading.local()
 
     def _endpoint(self, path: str) -> str:
-        """拼接请求地址：仅接受固定路径常量；origin 已在 __init__ 校验协议与主机白名单。"""
+        """Build a request URL: only fixed path constants are accepted; the origin
+        was validated (scheme + host whitelist) in __init__."""
         if path not in (_TAGS_PATH, _GENERATE_PATH):
             raise ValueError("unknown endpoint path: {!r}".format(path))
         return self._origin + path
 
     def is_available(self) -> bool:
-        """探测 /api/tags；成功才缓存 True，失败不缓存、下次再试。"""
+        """Probe /api/tags; only success is cached as True, failures re-probe next time."""
         if self._available:
             return True
         try:
@@ -99,11 +113,12 @@ class OllamaClient:
             return True
         return False
 
-    def _post_with_retry(self, payload: dict) -> dict:
-        """带指数退避的 POST。
+    def _post_with_retry(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST with exponential backoff.
 
-        重试条件：网络超时、连接错误、5xx；4xx（如 400 Bad Request）不重试直接抛出。
-        最多重试 3 次，间隔 1s / 2s / 4s；重试次数写入 thread-local 供 trace 归因。
+        Retries on: network timeouts, connection errors, 5xx; 4xx (e.g. 400) raises
+        immediately without retry. At most 3 retries with 1s / 2s / 4s delays; the
+        retry count lands in thread-local state for trace attribution.
         """
         attempt = 0
         while True:
@@ -129,11 +144,11 @@ class OllamaClient:
                 )
                 time.sleep(RETRY_DELAYS[attempt - 1])
                 continue
-            resp.raise_for_status()  # 4xx/其余状态直接抛出，不重试
+            resp.raise_for_status()  # 4xx and anything else raise immediately
             self._tls.last_retries = attempt
             return resp.json()
 
-    def _generate(self, prompt: str, system: str) -> dict:
+    def _generate(self, prompt: str, system: str) -> Dict[str, Any]:
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -150,15 +165,16 @@ class OllamaClient:
         }
         return self._parse_json(body.get("response", ""))
 
-    def take_last_usage(self) -> Optional[dict]:
-        """取走并清空本线程最近一次生成的 token/重试用量（供 trace 打点归因）。"""
+    def take_last_usage(self) -> Optional[Dict[str, Any]]:
+        """Take (and clear) this thread's latest token/retry usage for trace attribution."""
         usage = getattr(self._tls, "last_usage", None)
         self._tls.last_usage = None
         return usage
 
     @staticmethod
-    def _parse_json(raw: str) -> dict:
-        """解析模型输出；处理 ```json 包裹；失败返回 {"raw": ..., "parse_error": True}。"""
+    def _parse_json(raw: str) -> Dict[str, Any]:
+        """Parse model output; unwraps ```json fences; failures return
+        {"raw": ..., "parse_error": True}."""
         text = (raw or "").strip()
         if not text:
             return {"raw": raw, "parse_error": True}
@@ -171,8 +187,15 @@ class OllamaClient:
             return {"raw": raw, "parse_error": True}
         return parsed if isinstance(parsed, dict) else {"raw": raw, "parse_error": True}
 
-    def analyze(self, errors: List[str], extra: Optional[list] = None, lessons: Optional[list] = None,
-                failed: Optional[list] = None, similar: Optional[list] = None) -> dict:
+    def analyze(
+        self,
+        errors: List[str],
+        extra: Optional[list] = None,
+        lessons: Optional[list] = None,
+        failed: Optional[list] = None,
+        similar: Optional[list] = None,
+    ) -> Dict[str, Any]:
+        """Analyze clustered errors and produce summary/causes/gaps/conclusion."""
         prompt = ANALYZE_USER.format(
             lessons=_bullets(lessons),
             errors=_bullets(errors),
@@ -191,7 +214,8 @@ class OllamaClient:
         existing: Optional[list] = None,
         lessons: Optional[list] = None,
         failed: Optional[list] = None,
-    ) -> dict:
+    ) -> Dict[str, Any]:
+        """Propose the next batch of read-only investigation tasks."""
         prompt = PLAN_USER.format(
             lessons=_bullets(lessons),
             errors=_bullets(errors),
@@ -206,11 +230,11 @@ class OllamaClient:
 def _bullets(items) -> str:
     items = list(items or [])
     if not items:
-        return "(无)"
+        return "(none)"
     return "\n".join("- {}".format(item) for item in items)
 
 
-def _as_int(value) -> int:
+def _as_int(value: Any) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):

@@ -1,8 +1,8 @@
-"""v0.6.0 基础设施测试：Token 熔断、API 鉴权、Ollama 重试、Repository 路由。
+"""v0.6.0 infrastructure tests: token budget circuit breaker, API auth, Ollama
+retries, repository routing.
 
-安全说明：API 鉴权用例的伪密钥在运行时动态生成（uuid4），
-不向源码写入任何凭据字面量。
-"""
+Security note: the fake API keys in the auth tests are generated at runtime
+(uuid4) — no credential literals are ever written into source."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from app.tools.registry import ToolRegistry
 
 
 class _HugeTokenLLM:
-    """单次调用就烧掉巨额 token 的假 LLM，用于验证预算熔断。"""
+    """Fake LLM burning a huge token budget per call, to exercise the breaker."""
 
     def __init__(self, prompt_tokens=40000, completion_tokens=20000):
         self._usage = None
@@ -67,7 +67,7 @@ def _make_loop(tmp_path, llm, max_tokens_per_episode, auto_approve=True):
     )
 
 
-# ---------- Token 预算熔断 ----------
+# ---------- token budget circuit breaker ----------
 
 def test_token_budget_circuit_breaker(tmp_path):
     llm = _HugeTokenLLM(prompt_tokens=40000, completion_tokens=20000)  # 60000 > 50000
@@ -77,13 +77,13 @@ def test_token_budget_circuit_breaker(tmp_path):
 
     assert ep.phase.value == "failed"
     assert ep.error == "Token budget exceeded: 60000 / 50000"
-    # 熔断发生在 analyze 之后：propose 不再执行
+    # the breaker trips after analyze: propose never runs
     assert llm.calls == 1
     assert ep.iteration == 1
     breaks = [e for e in ep.trace if e["stage"] == "circuit_break"]
     assert len(breaks) == 1
     assert breaks[0]["detail"] == {"used_tokens": 60000, "max_tokens": 50000}
-    # 持久化后状态一致
+    # consistent after persistence
     assert loop.memory.load(ep.id).phase.value == "failed"
 
 
@@ -111,7 +111,7 @@ def test_token_budget_not_hit_when_under_limit(tmp_path):
     assert not any(e["stage"] == "circuit_break" for e in ep.trace)
 
 
-# ---------- API Key 鉴权 ----------
+# ---------- API key auth ----------
 
 def _auth_app(tmp_path, api_key):
     from app.main import create_app
@@ -128,22 +128,22 @@ def _auth_app(tmp_path, api_key):
 
 
 def test_api_auth(tmp_path):
-    # 运行时生成伪密钥（不向源码写入凭据字面量）
+    # runtime-generated fake keys (no credential literals in source)
     api_key = "test-" + uuid.uuid4().hex
     wrong_key = "test-" + uuid.uuid4().hex
     client = _auth_app(tmp_path, api_key)
 
-    # /health 免鉴权
+    # /health is exempt
     assert client.get("/health").status_code == 200
 
-    # 不带 header / 错误 key → 401
+    # no header / wrong key -> 401
     assert client.get("/episodes").status_code == 401
     assert client.get("/metrics").status_code == 401
     resp = client.get("/episodes", headers={"X-API-Key": wrong_key})
     assert resp.status_code == 401
     assert resp.json()["detail"] == "Unauthorized"
 
-    # 正确 key → 200
+    # correct key -> 200
     ok = client.get("/episodes", headers={"X-API-Key": api_key})
     assert ok.status_code == 200
 
@@ -151,10 +151,10 @@ def test_api_auth(tmp_path):
 def test_api_auth_disabled_when_key_empty(tmp_path):
     client = _auth_app(tmp_path, "")
     assert client.get("/health").status_code == 200
-    assert client.get("/episodes").status_code == 200  # 鉴权关闭
+    assert client.get("/episodes").status_code == 200  # auth disabled
 
 
-# ---------- Ollama 重试 ----------
+# ---------- Ollama retries ----------
 
 def _fake_resp(status_code=200, body=None):
     class _Resp:
@@ -193,11 +193,11 @@ def test_ollama_retry_on_timeout_then_success(monkeypatch):
 
     client = oc.OllamaClient("http://127.0.0.1:11434", "m", 5, allowed_hosts=("127.0.0.1",))
     monkeypatch.setattr(oc.httpx, "post", fake_post)
-    monkeypatch.setattr(oc.time, "sleep", lambda s: None)  # 测试不真等退避
+    monkeypatch.setattr(oc.time, "sleep", lambda s: None)  # tests never wait for backoff
 
     result = client._generate("p", "s")
     assert result["summary"] == "s"
-    assert calls["n"] == 2  # 第一次超时 + 第一次重试成功
+    assert calls["n"] == 2  # first timeout + first retry succeeds
     assert client.take_last_usage()["retries"] == 1
 
 
@@ -239,16 +239,16 @@ def test_ollama_no_retry_on_4xx(monkeypatch):
 
     with pytest.raises(httpx.HTTPStatusError):
         client._generate("p", "s")
-    assert calls["n"] == 1  # 4xx 不重试
+    assert calls["n"] == 1  # 4xx never retries
 
 
-# ---------- Repository ----------
+# ---------- repository ----------
 
 def test_repository_defaults_to_sqlite(tmp_path):
     from app.kernel import repository as repo_module
 
     assert issubclass(SqliteEpisodeRepository, EpisodeRepository)
-    assert repo_module.extract_keywords(["ERROR redis connection refused"])  # 共享纯函数可用
+    assert repo_module.extract_keywords(["ERROR redis connection refused"])  # shared pure fn
 
     mem = Memory(str(tmp_path / "m.sqlite3"))
     assert isinstance(mem, EpisodeRepository)
@@ -258,7 +258,7 @@ def test_repository_defaults_to_sqlite(tmp_path):
 def test_postgres_repository():
     dsn = os.environ.get("MORAY_AIO_DB_DSN", "").strip()
     if not dsn:
-        pytest.skip("MORAY_AIO_DB_DSN 未配置，跳过 Postgres 集成测试")
+        pytest.skip("MORAY_AIO_DB_DSN not configured; skipping Postgres integration test")
     pytest.importorskip("psycopg2")
     from app.kernel.postgres_repository import PostgresEpisodeRepository
 

@@ -1,4 +1,5 @@
-"""log_reader 只读行为测试：尾部窗口、时间正序、截断行丢弃、异常路径、白名单。"""
+"""log_reader read-only behavior tests: tail windows, time order, truncated-line
+dropping, error paths, and the tool whitelist."""
 
 from __future__ import annotations
 
@@ -81,13 +82,13 @@ def test_grep_regex_time_ascending(tmp_path):
 
 
 def test_truncated_first_line_is_dropped(tmp_path):
-    # 一行 100 字节的超长行 + 一条正常 ERROR；窗口只看最后 50 字节时
-    # 窗口起点落在超长行中间，首个不完整行必须被丢弃
+    # a 100-byte giant line plus one normal ERROR; with a 50-byte window the window
+    # starts mid-giant-line, so the first incomplete line must be dropped
     path = _write(tmp_path, ["A" * 100, "ERROR real"])
     hits = recent_errors(path, limit=10, max_scan_bytes=50)
     assert [h.text for h in hits] == ["ERROR real"]
     assert tail(path, 10, max_scan_bytes=50) == ["ERROR real"]
-    # 全文件只有 real 行含 ERROR
+    # only the "real" line contains ERROR in the whole file
     assert len(recent_errors(path, limit=10)) == 1
 
 
@@ -108,18 +109,18 @@ def test_registry_whitelist_rejects_outside_paths(tmp_path):
     inside = _write(tmp_path, ["ERROR x"])
     registry = ToolRegistry([str(tmp_path)], max_scan_bytes=1024 * 1024)
 
-    # 白名单内：可用
+    # inside the whitelist: works
     assert registry.call("log_tail", {"path": str(inside), "n": 10}) == ["ERROR x"]
 
-    # 白名单外：PermissionError
+    # outside the whitelist: PermissionError
     outside = str(tmp_path.parent / ("outside_" + inside.name))
     with pytest.raises(PermissionError):
         registry._check_path(outside)
 
-    # 目录穿越：resolve 后越界，同样拒绝
+    # directory traversal: resolves outside the root, also rejected
     with pytest.raises(PermissionError):
         registry._check_path(str(tmp_path / ".." / "escape.log"))
 
-    # 未知工具：ValueError
+    # unknown tool: ValueError
     with pytest.raises(ValueError):
         registry.call("no_such_tool", {})

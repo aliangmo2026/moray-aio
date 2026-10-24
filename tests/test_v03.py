@@ -1,4 +1,5 @@
-"""v0.3.0 新能力测试：异步 episode、滚动日志聚合、错误聚类、记忆线程安全。"""
+"""v0.3.0 capability tests: async episodes, rolling log aggregation, error
+clustering, memory thread safety."""
 
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from app.tools.log_reader import LogReadError, read_rolling
 from app.tools.registry import ToolRegistry
 
 
-# ---------- 异步 episode ----------
+# ---------- async episodes ----------
 
 class _OfflineLLM:
     def is_available(self):
@@ -51,7 +52,7 @@ def _make_loop(tmp_path, auto_approve=True):
 def test_start_async_runs_in_background(tmp_path):
     loop = _make_loop(tmp_path)
     episode_id = loop.start_async()
-    # 立即返回 id；随后能查到 episode 并最终收敛
+    # returns an id immediately; the episode becomes visible and eventually converges
     assert episode_id
     ep = loop.require(episode_id)
     assert ep.phase.value in ("created", "queued", "observing", "analyzing", "proposing", "executing")
@@ -74,9 +75,9 @@ def test_async_episode_api_returns_202(tmp_path, monkeypatch):
     monkeypatch.setattr(routes, "get_loop", lambda: loop)
     monkeypatch.setattr(routes, "get_llm", lambda: _OfflineLLM())
 
-    from app.main import app
+    from app.main import create_app
 
-    client = TestClient(app)
+    client = TestClient(create_app(dataclasses.replace(Settings(), rate_limit_per_minute=0)))
 
     resp = client.post("/episodes")
     assert resp.status_code == 202
@@ -84,11 +85,11 @@ def test_async_episode_api_returns_202(tmp_path, monkeypatch):
     assert body["phase"] == "created"
     episode_id = body["episode_id"]
 
-    # 同步入口仍可用：返回完整 episode dict
+    # the sync entry point still works: returns a full episode dict
     sync_ep = client.post("/episodes/sync").json()
     assert sync_ep["phase"] in ("concluded", "awaiting_approval", "failed")
 
-    # 轮询异步 episode 到终态
+    # poll the async episode to a terminal state
     deadline = time.time() + 15
     final = None
     while time.time() < deadline:
@@ -100,14 +101,14 @@ def test_async_episode_api_returns_202(tmp_path, monkeypatch):
     assert final["id"] == episode_id
 
 
-# ---------- 滚动日志聚合 ----------
+# ---------- rolling log aggregation ----------
 
 def test_rolling_reader_merges_files_in_order(tmp_path):
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    f2 = log_dir / "moray.err.log.2"  # 最旧
+    f2 = log_dir / "moray.err.log.2"  # oldest
     f1 = log_dir / "moray.err.log.1"
-    f0 = log_dir / "moray.err.log"    # 最新
+    f0 = log_dir / "moray.err.log"    # newest
     f2.write_text("2026-10-24 10:00:00 ERROR old-1\n2026-10-24 10:01:00 ERROR old-2\n", encoding="utf-8")
     f1.write_text("2026-10-24 11:00:00 ERROR mid-1\n2026-10-24 11:01:00 INFO mid-noise\n2026-10-24 11:02:00 ERROR mid-2\n", encoding="utf-8")
     f0.write_text("2026-10-24 12:00:00 ERROR new-1\n2026-10-24 12:01:00 ERROR new-2\n2026-10-24 12:02:00 ERROR new-3\n2026-10-24 12:03:00 ERROR new-4\n", encoding="utf-8")
@@ -117,7 +118,7 @@ def test_rolling_reader_merges_files_in_order(tmp_path):
     os.utime(f0, (base + 200, base + 200))
 
     lines = read_rolling(log_dir, "moray.err.log*", n=6)
-    # 时间正序跨文件：旧文件尾部在前，新文件在后
+    # time ascending across files: old-file tail first, then the new file
     assert lines == [
         "2026-10-24 11:01:00 INFO mid-noise",
         "2026-10-24 11:02:00 ERROR mid-2",
@@ -127,7 +128,7 @@ def test_rolling_reader_merges_files_in_order(tmp_path):
         "2026-10-24 12:03:00 ERROR new-4",
     ]
 
-    # keyword 过滤（f0 有 4 条、f1 有 2 条、f2 有 2 条 ERROR，共 8 条，时间正序）
+    # keyword filter (f0 has 4, f1 has 2, f2 has 2 ERROR lines = 8 total)
     errors = read_rolling(log_dir, "moray.err.log*", n=10, keyword="ERROR")
     assert errors == [
         "2026-10-24 10:00:00 ERROR old-1",
@@ -140,7 +141,7 @@ def test_rolling_reader_merges_files_in_order(tmp_path):
         "2026-10-24 12:03:00 ERROR new-4",
     ]
 
-    # 目录不存在
+    # missing directory
     with pytest.raises(LogReadError):
         read_rolling(tmp_path / "ghost-dir", "moray.err.log*", n=5)
 
@@ -188,7 +189,7 @@ def test_observe_uses_rolling_when_log_dir_set(tmp_path):
     assert any("Connection refused" in e.get("text", "") for e in obs[0]["errors"])
 
 
-# ---------- 错误聚类 ----------
+# ---------- error clustering ----------
 
 def test_normalize_replaces_volatile_fields():
     line = "2026-10-24 14:20:01 ERROR dial tcp 127.0.0.1:6379 refused id=a1b2c3"
@@ -198,7 +199,7 @@ def test_normalize_replaces_volatile_fields():
 def test_clusterer_folds_1000_lines_into_few_classes():
     lines = []
     for i in range(333):
-        # id 用 >=6 位的十六进制串，保证被归一化为 <HEX>
+        # ids are >= 6 hex chars so they normalize to <HEX>
         lines.append(
             "2026-10-24 14:{:02d}:{:02d} ERROR dial tcp 10.0.0.{}:{} refused id=beef{:06x}".format(
                 i % 60, i % 60, i % 250, 6000 + i % 300, i
@@ -222,13 +223,13 @@ def test_clusterer_folds_1000_lines_into_few_classes():
     assert 3 <= len(result) <= 5
     assert result[0]["count"] >= 334
     assert "<IP>" in result[0]["template"] or "<NUM>" in result[0]["template"]
-    # 样本保留原始行，LLM 仍能看到真实日志样例
+    # the sample keeps the original line so the LLM still sees a real example
     assert result[0]["sample_line"].startswith("2026-")
-    # top_n 截断生效
+    # top_n truncation works
     assert len(cluster(lines, top_n=2)) == 2
 
 
-# ---------- 记忆线程安全 ----------
+# ---------- memory thread safety ----------
 
 def test_memory_threadsafe_concurrent_saves(tmp_path):
     memory = Memory(str(tmp_path / "memory.sqlite3"))
@@ -241,7 +242,7 @@ def test_memory_threadsafe_concurrent_saves(tmp_path):
                 ep.transition("queued")
                 ep.transition("observing")
                 memory.save(ep)
-        except Exception as exc:  # 任何异常都算失败
+        except Exception as exc:  # any exception counts as a failure
             errors.append(exc)
 
     threads = [threading.Thread(target=worker, args=(w,)) for w in range(8)]
@@ -252,5 +253,5 @@ def test_memory_threadsafe_concurrent_saves(tmp_path):
 
     assert not errors
     all_eps = memory.list_recent(limit=1000)
-    assert len(all_eps) == 200  # 8 线程 × 25 条，一条不丢
+    assert len(all_eps) == 200  # 8 threads x 25 saves, nothing lost
     assert all(ep.phase.value == "observing" for ep in all_eps)

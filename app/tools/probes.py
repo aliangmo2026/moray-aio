@@ -1,13 +1,17 @@
-"""只读系统探针：观察系统状态，绝不修改。
+"""Read-only system probes: observe system state, never modify anything.
 
-硬约束：
-- 绝不执行任何修改系统状态的操作（不 kill、不启停服务、不写文件、不提权）；
-- port_check 的 host 必须命中白名单，windows_service_status 的 service_name 必须通过
-  安全正则 ^[A-Za-z0-9_\\-\\s]{1,64}$（防命令注入）——违规直接抛 PermissionError（fail-closed）；
-- 优先使用 psutil 纯只读 API（零 subprocess）；仅在 psutil 不可用时才退到
-  list 形式 + shell=False 的只读命令（tasklist / sc query）；
-- 所有探测失败都优雅降级为 {"error": ...} 或 open=false，绝不让 episode 崩溃；
-- 输出有长度上限（probe_output_max_bytes），防止撑爆 episode 载荷。
+Hard rules:
+- No state-changing operations whatsoever (no kill, no service start/stop, no file
+  writes, no privilege escalation);
+- port_check hosts must hit the whitelist; windows_service_status service_name must
+  pass the safety regex ^[A-Za-z0-9_\\-\\s]{1,64}$ (anti command-injection) —
+  violations raise PermissionError (fail-closed);
+- psutil read-only APIs are preferred (zero subprocess); only when psutil is
+  unavailable do we fall back to list-form, shell=False read-only commands
+  (tasklist / sc query);
+- Every probe failure degrades gracefully to {"error": ...} or open=false — a probe
+  can never crash an episode;
+- Output is length-capped (probe_output_max_bytes) to protect the episode payload.
 """
 
 from __future__ import annotations
@@ -31,16 +35,18 @@ def _normalize_whitelist(whitelist) -> set:
     return {str(h).strip().lower() for h in (whitelist or DEFAULT_HOST_WHITELIST) if h}
 
 
-def check_host_allowed(host, whitelist) -> None:
-    """host 白名单校验；越界抛 PermissionError（fail-closed）。"""
+def check_host_allowed(host: str, whitelist) -> None:
+    """Host whitelist validation; raises PermissionError (fail-closed)."""
     if not host or str(host).strip().lower() not in _normalize_whitelist(whitelist):
         raise PermissionError(
-            "probe host {!r} is not in the host whitelist {}".format(host, sorted(_normalize_whitelist(whitelist)))
+            "probe host {!r} is not in the host whitelist {}".format(
+                host, sorted(_normalize_whitelist(whitelist))
+            )
         )
 
 
 def _run_readonly_command(cmd: List[str]) -> Optional[str]:
-    """list 形式 + shell=False 的只读命令；任何失败返回 None，绝不抛出。"""
+    """List-form, shell=False read-only command; any failure returns None, never raises."""
     try:
         completed = subprocess.run(
             cmd, shell=False, capture_output=True, timeout=_SUBPROC_TIMEOUT,
@@ -54,8 +60,8 @@ def _run_readonly_command(cmd: List[str]) -> Optional[str]:
 
 # ---------------------------------------------------------------- port_check
 
-def port_check(host, port, timeout=2, host_whitelist=None) -> dict:
-    """探测 TCP 端口是否可连。失败/超时返回 open=false，不抛异常。"""
+def port_check(host: str, port: int, timeout: float = 2, host_whitelist=None) -> dict:
+    """Probe TCP port reachability. Failures/timeouts return open=false, never raise."""
     check_host_allowed(host, host_whitelist)
     try:
         port = int(port)
@@ -76,23 +82,25 @@ def port_check(host, port, timeout=2, host_whitelist=None) -> dict:
 
 # ---------------------------------------------------------------- process_list
 
-def process_list(name_pattern=None, max_processes=50) -> dict:
-    """只读列出进程（pid/name/username/cpu/memory/create_time），最多 max_processes 条。
+def process_list(name_pattern: Optional[str] = None, max_processes: int = 50) -> dict:
+    """Read-only process listing (pid/name/username/cpu/memory/create_time), capped
+    at max_processes entries.
 
-    绝不 terminate/发送信号。psutil 不可用时退到 tasklist（list 形式，shell=False）。
+    Never terminates/signals anything. Falls back to tasklist (list form,
+    shell=False) when psutil is unavailable.
     """
     limit = max(1, int(max_processes))
     regex = None
     if name_pattern:
-        regex = re.compile(str(name_pattern))  # 非法正则抛 re.error，由调用方按失败任务处理
+        regex = re.compile(str(name_pattern))  # invalid regex -> re.error, handled by caller
 
     try:
-        import psutil  # 局部导入：探针层不强依赖
+        import psutil  # local import: probes do not hard-require psutil
     except ImportError:
         psutil = None
 
     if psutil is not None:
-        processes = []
+        processes: List[dict] = []
         fields = ["pid", "name", "username", "cpu_percent", "memory_info", "create_time"]
         for proc in psutil.process_iter(attrs=fields, ad_value=None):
             info = proc.info
@@ -114,9 +122,12 @@ def process_list(name_pattern=None, max_processes=50) -> dict:
                 break
         return {"count": len(processes), "processes": processes, "source": "psutil"}
 
-    # 兜底：tasklist（Windows only，list 形式只读查询）
+    # Fallback: tasklist (Windows only, list form, read-only query)
     if os.name != "nt":
-        return {"error": "probe_unavailable", "detail": "psutil unavailable; tasklist is windows-only"}
+        return {
+            "error": "probe_unavailable",
+            "detail": "psutil unavailable; tasklist is windows-only",
+        }
     raw = _run_readonly_command(["tasklist", "/fo", "csv", "/nh"])
     if raw is None:
         return {"error": "probe_unavailable", "detail": "psutil unavailable and tasklist failed"}
@@ -138,8 +149,14 @@ def process_list(name_pattern=None, max_processes=50) -> dict:
         except ValueError:
             memory_mb = None
         processes.append(
-            {"pid": pid, "name": name, "username": parts[2] if len(parts) > 2 else None,
-             "cpu_percent": None, "memory_mb": memory_mb, "create_time": None}
+            {
+                "pid": pid,
+                "name": name,
+                "username": parts[2] if len(parts) > 2 else None,
+                "cpu_percent": None,
+                "memory_mb": memory_mb,
+                "create_time": None,
+            }
         )
         if len(processes) >= limit:
             break
@@ -148,8 +165,9 @@ def process_list(name_pattern=None, max_processes=50) -> dict:
 
 # ---------------------------------------------------------------- disk_usage
 
-def disk_usage(path) -> dict:
-    """只读查询磁盘占用（shutil.disk_usage，不写任何数据）。白名单由 ToolRegistry 校验。"""
+def disk_usage(path: str) -> dict:
+    """Read-only disk usage via shutil.disk_usage (writes nothing).
+    Path whitelist is enforced by ToolRegistry."""
     total, used, free = shutil.disk_usage(str(path))
     total_gb = round(total / 1073741824.0, 2)
     used_gb = round(used / 1073741824.0, 2)
@@ -166,12 +184,13 @@ def disk_usage(path) -> dict:
 
 # ---------------------------------------------------------------- windows_service_status
 
-def windows_service_status(service_name, output_max_bytes=4096) -> dict:
-    """只读查询 Windows 服务状态（绝不 start/stop）。
+def windows_service_status(service_name: str, output_max_bytes: int = 4096) -> dict:
+    """Read-only Windows service state query (never start/stop).
 
-    service_name 必须通过安全正则，否则抛 PermissionError。
-    首选 psutil.win_service_iter（纯只读枚举，零 subprocess）；不可用时退到
-    `sc query <name>`（list 形式 + shell=False）。非 Windows 返回 {"error": "not_windows"}。
+    service_name must pass the safety regex or PermissionError is raised.
+    psutil.win_service_iter (pure read-only enumeration, zero subprocess) is tried
+    first; `sc query <name>` (list form + shell=False) is the fallback.
+    Non-Windows returns {"error": "not_windows"}.
     """
     name = str(service_name or "").strip()
     if not name or not SERVICE_NAME_RE.match(name):
@@ -204,9 +223,12 @@ def windows_service_status(service_name, output_max_bytes=4096) -> dict:
                         "state": state,
                         "raw_output": json.dumps(info, ensure_ascii=False)[:cap],
                     }
-            return {"name": name, "state": "UNKNOWN", "raw_output": "", "detail": "service not found"}
+            return {
+                "name": name, "state": "UNKNOWN", "raw_output": "",
+                "detail": "service not found",
+            }
         except Exception as exc:
-            # psutil 查询失败 → 落到 sc query 兜底
+            # psutil query failed -> fall through to sc query
             fallback_reason = "{}: {}".format(type(exc).__name__, exc)
     else:
         fallback_reason = "psutil unavailable"

@@ -1,4 +1,5 @@
-"""依赖装配：进程级单例（lru_cache），FastAPI 路由按需取用。"""
+"""Dependency wiring: process-wide singletons via lru_cache, consumed lazily by
+FastAPI routes and the CLI."""
 
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from app.tools.registry import ToolRegistry
 
 @lru_cache(maxsize=1)
 def get_repository() -> EpisodeRepository:
-    """按配置选择仓储：MORAY_AIO_DB_DSN 存在 → Postgres；否则默认 SQLite。"""
+    """Pick the repository by config: MORAY_AIO_DB_DSN -> Postgres; else SQLite."""
     if settings.db_dsn:
         from app.kernel.postgres_repository import PostgresEpisodeRepository
 
@@ -24,13 +25,14 @@ def get_repository() -> EpisodeRepository:
 
 @lru_cache(maxsize=1)
 def get_memory() -> EpisodeRepository:
-    """向后兼容别名（v0.6.0 起持久化统一走 EpisodeRepository 接口）。"""
+    """Backward-compatible alias (since v0.6.0 persistence goes through the
+    EpisodeRepository interface)."""
     return get_repository()
 
 
 @lru_cache(maxsize=1)
 def get_tools() -> ToolRegistry:
-    """只读工具注册表（内置工具 + MORAY_AIO_PLUGIN_DIRS 目录插件）。"""
+    """Read-only tool registry (built-in tools + MORAY_AIO_PLUGIN_DIRS plugins)."""
     return ToolRegistry(
         settings.readonly_roots,
         settings.max_scan_bytes,
@@ -43,7 +45,8 @@ def get_tools() -> ToolRegistry:
 
 @lru_cache(maxsize=1)
 def get_llm() -> OllamaClient:
-    """Ollama 客户端。不可用时内核会在调用点回退启发式（见 loop/planner）。"""
+    """Ollama client. When unavailable, the kernel falls back to heuristics at the
+    call site (see loop/planner)."""
     return OllamaClient(
         settings.ollama_url,
         settings.ollama_model,
@@ -54,7 +57,7 @@ def get_llm() -> OllamaClient:
 
 @lru_cache(maxsize=1)
 def get_loop() -> EvolutionLoop:
-    """自我迭代主循环（组装 memory/tools/llm）。"""
+    """Self-evolution main loop (assembles memory/tools/llm)."""
     return EvolutionLoop(
         settings=settings,
         memory=get_memory(),

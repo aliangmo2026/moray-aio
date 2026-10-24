@@ -1,5 +1,7 @@
 # moray-aio
 
+> An event-driven, physically-sandboxed, local-LLM powered AIOps agent for production.
+
 ![Build Passing](https://img.shields.io/badge/build-passing-brightgreen)
 ![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
 ![Docker ready](https://img.shields.io/badge/docker-ready-blue)
@@ -7,6 +9,11 @@
 
 基于本地大模型（Ollama）的 **AIOps 智能运维 Agent**，定位是「**只读分析、辅助决策**」。
 事件驱动：主动监听日志 → 规则触发 → 自驱分析 → Webhook 告警；独立引擎通过 HTTP 供外部系统接入。
+
+![moray-aio dashboard](docs/assets/dashboard.png)
+<!-- Screenshot: start the service, open http://127.0.0.1:8020/dashboard —
+     dark console with metric cards, episode list and the trace waterfall.
+     Capture it and save as docs/assets/dashboard.png. -->
 
 ## 核心能力（本阶段 MVP）
 

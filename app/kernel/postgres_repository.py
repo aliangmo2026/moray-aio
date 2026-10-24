@@ -1,8 +1,10 @@
-"""Postgres 仓储实现（MORAY_AIO_DB_DSN 配置时启用，多进程/高并发模式）。
+"""Postgres repository implementation (enabled via MORAY_AIO_DB_DSN; multi-process mode).
 
-- 驱动：psycopg2（psycopg2-binary），惰性导入——未安装时只有显式使用才会报错；
-- SQL 一律参数绑定（%s），绝不拼接；ON CONFLICT upsert；
-- 连接级 threading.Lock 串行化（与 SQLite 实现同策略；如需更高并发可换连接池）。
+- Driver: psycopg2 (psycopg2-binary), imported lazily — the default SQLite mode
+  never requires this dependency;
+- All SQL is parameterized (%s), never concatenated; upserts use ON CONFLICT;
+- A connection-level threading.Lock serializes access (same strategy as the SQLite
+  implementation; swap in a connection pool for higher concurrency).
 """
 
 from __future__ import annotations
@@ -22,11 +24,12 @@ from app.kernel.state import Episode
 
 
 class PostgresEpisodeRepository(EpisodeRepository):
-    """Postgres 持久化。DSN 形如 postgresql://user:pass@host:5432/db（从环境变量读取）。"""
+    """Postgres persistence. DSN looks like postgresql://user:pass@host:5432/db
+    (read from environment variables only)."""
 
     def __init__(self, dsn: str):
         try:
-            import psycopg2  # 惰性导入：默认 SQLite 模式不依赖该驱动
+            import psycopg2  # lazy import: default SQLite mode does not need the driver
         except ImportError as exc:
             raise RuntimeError(
                 "Postgres mode requires psycopg2: pip install -r requirements-optional.txt"
@@ -177,8 +180,10 @@ class PostgresEpisodeRepository(EpisodeRepository):
             with self._conn.cursor() as cur:
                 cur.execute("SELECT episode_id, keywords, conclusion FROM episodes_index")
                 rows = cur.fetchall()
-        return rank_similar(rows, keywords, top_k=top_k, threshold=threshold,
-                            exclude_episode_id=exclude_episode_id)
+        return rank_similar(
+            rows, keywords, top_k=top_k, threshold=threshold,
+            exclude_episode_id=exclude_episode_id,
+        )
 
     def close(self) -> None:
         with self._lock:

@@ -1,9 +1,11 @@
-"""日志监听器：os.stat 轮询检测新增内容（跨平台，Windows 无 inotify）。
+"""Log watcher: os.stat polling for appended content (cross-platform; Windows has
+no inotify and polling keeps behavior identical everywhere).
 
-硬约束：
-- 只读打开（'rb'），绝不写、截断、改名被监控日志；
-- 循环内任何异常只记录日志并继续，绝不让线程崩溃；
-- 文件被 logrotate 截断（变小）→ offset 重置 0；被删除重建（inode 变化）→ 重新探测。
+Hard rules:
+- Opened read-only ('rb'); never writes, truncates or renames the watched log;
+- Any exception inside the loop is logged and swallowed — the thread never dies;
+- logrotate truncation (smaller file) resets the offset to 0; deleted-and-recreated
+  files (inode change) are re-detected.
 """
 
 from __future__ import annotations
@@ -20,7 +22,8 @@ DEFAULT_ERROR_PATTERN = r"\bERROR\b"
 
 
 class LogWatcher:
-    """轮询式日志尾随器：新内容按行切分，命中 error_pattern 的行回调出去。"""
+    """Polling log tailer: new lines are split and lines matching error_pattern
+    are pushed to the callback."""
 
     def __init__(
         self,
@@ -38,7 +41,7 @@ class LogWatcher:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
-    # ---------- 生命周期 ----------
+    # ---------- lifecycle ----------
 
     def start(self) -> None:
         if self.is_running():
@@ -59,7 +62,7 @@ class LogWatcher:
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    # ---------- 主循环 ----------
+    # ---------- main loop ----------
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -73,31 +76,31 @@ class LogWatcher:
                 logger.exception("log watcher tick failed (ignored)")
             self._stop.wait(self.poll_interval)
 
-    # ---------- 读取（只读）----------
+    # ---------- reading (read-only) ----------
 
     def _read_new_lines(self) -> List[str]:
-        """读取自上次 offset 以来的新增完整行；旋转/重建自动归零。"""
+        """Read complete new lines since the last offset; rotation/reset auto-handles."""
         try:
             st = os.stat(self.log_path)
         except OSError:
             self._sig = None
-            return []  # 文件暂不存在：下一轮重新探测
+            return []  # file temporarily missing: re-probe next tick
         sig = (getattr(st, "st_ino", 0), getattr(st, "st_dev", 0))
         size = st.st_size
         if self._sig is not None and sig != self._sig:
-            self._offset = 0  # 文件被删除重建
+            self._offset = 0  # file was deleted and recreated
         if size < self._offset:
-            self._offset = 0  # logrotate 截断
+            self._offset = 0  # logrotate truncation
         self._sig = sig
         if size <= self._offset:
             return []
-        with open(self.log_path, "rb") as fh:  # 只读二进制，绝不写
+        with open(self.log_path, "rb") as fh:  # read-only binary, never write
             fh.seek(self._offset)
             data = fh.read(size - self._offset)
         if not data:
             return []
         parts = data.split(b"\n")
-        tail = parts.pop()  # 可能是不完整行：不消费
+        tail = parts.pop()  # possibly an incomplete line: not consumed yet
         self._offset += len(data) - len(tail)
         out = []
         for raw in parts:

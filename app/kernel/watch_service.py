@@ -1,16 +1,17 @@
-"""Watch 模式：日志变化 → 规则触发 → 自动分析 Episode → 告警推送。
+"""Watch mode: log changes -> trigger rules -> auto analysis -> alert push.
 
-WatchService 把三个部件缝起来：
-- LogWatcher：轮询日志新增的 ERROR 行（只读）；
-- TriggerEngine：判断「是否值得唤醒」（阈值/窗口/冷却）；
-- EvolutionLoop：start_async 触发一次只读分析 episode；
-- BaseNotifier：episode 终态后推送结论（concluded）或错误（failed）。
+WatchService wires three parts together:
+- LogWatcher: polls the log for new ERROR lines (read-only);
+- TriggerEngine: decides whether it is worth waking the agent (threshold/window/cooldown);
+- EvolutionLoop: start_async launches one read-only analysis episode;
+- BaseNotifier: pushes the conclusion (concluded) or error (failed) at terminal state.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from app.kernel.state import Phase
@@ -20,15 +21,26 @@ from app.kernel.watcher import LogWatcher
 logger = logging.getLogger("moray_aio.watch")
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _severity_for(rule: Rule) -> str:
     return "critical" if rule.name == "critical_keywords" else "warning"
 
 
 class WatchService:
-    """事件驱动主循环。tick() 为单步检查（线程与测试共用同一入口）。"""
+    """Event-driven main loop. tick() is one check step (shared by the thread and tests)."""
 
-    def __init__(self, log_path: str, rules, watcher: LogWatcher, loop, notifier,
-                 check_interval: float = 2.0):
+    def __init__(
+        self,
+        log_path: str,
+        rules,
+        watcher: LogWatcher,
+        loop,
+        notifier,
+        check_interval: float = 2.0,
+    ):
         self.log_path = str(log_path)
         self.engine = rules if isinstance(rules, TriggerEngine) else TriggerEngine(rules)
         self.watcher = watcher
@@ -37,17 +49,19 @@ class WatchService:
         self.check_interval = max(0.1, float(check_interval))
         self._pending: Dict[str, dict] = {}
         self._hits: Dict[str, int] = {name: 0 for name in self.engine.fire_count}
-        self._last_fired_at: Dict[str, Optional[str]] = {name: None for name in self.engine.fire_count}
+        self._last_fired_at: Dict[str, Optional[str]] = {
+            name: None for name in self.engine.fire_count
+        }
         self.notifications_sent = 0
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
-        # 监听器回调接到本服务
+        # watcher callback lands here
         self.watcher.on_lines = self.feed_lines
 
-    # ---------- 事件入口 ----------
+    # ---------- event entry ----------
 
     def feed_lines(self, lines: List[str]) -> None:
-        """watcher 回调：逐行喂给规则引擎，命中即触发 episode。"""
+        """Watcher callback: feed lines to the rule engine; fire -> launch an episode."""
         for line in lines:
             try:
                 rule = self.engine.feed(line)
@@ -67,12 +81,13 @@ class WatchService:
                 logger.exception("watch feed failed (ignored)")
 
     def tick(self) -> None:
-        """检查待完成 episode：终态即推送告警（concluded 带结论，failed 带错误）。"""
+        """Check pending episodes: push an alert at terminal state
+        (concluded carries the conclusion, failed carries the error)."""
         for episode_id in list(self._pending):
             try:
                 ep = self.loop.require(episode_id)
             except Exception:
-                continue  # episode 暂不可读：下一轮再试
+                continue  # episode not readable yet: retry next tick
             phase = getattr(ep.phase, "value", ep.phase)
             if phase not in (Phase.CONCLUDED.value, Phase.FAILED.value):
                 continue
@@ -84,13 +99,13 @@ class WatchService:
         severity = meta.get("severity", "warning")
         lines = list(meta.get("lines") or [])[:5]
         title = "[moray-aio] {} | {}".format(severity, rule_name)
-        parts = ["命中日志："]
+        parts = ["Matched log lines:"]
         parts.extend("  " + line for line in lines)
         phase = getattr(ep.phase, "value", ep.phase)
         if phase == Phase.CONCLUDED.value:
-            parts.append("结论: {}".format(getattr(ep, "conclusion", None) or "(无)"))
+            parts.append("Conclusion: {}".format(getattr(ep, "conclusion", None) or "(none)"))
         else:
-            parts.append("错误: {}".format(getattr(ep, "error", None) or "episode failed"))
+            parts.append("Error: {}".format(getattr(ep, "error", None) or "episode failed"))
         content = "\n".join(parts)
         try:
             if self.notifier.notify(title, content, severity):
@@ -98,7 +113,7 @@ class WatchService:
         except Exception:
             logger.exception("notifier failed (isolated)")
 
-    # ---------- 生命周期 ----------
+    # ---------- lifecycle ----------
 
     def start(self) -> None:
         if self.is_running():
@@ -146,18 +161,12 @@ class WatchService:
         }
 
 
-def _now_iso() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).isoformat()
-
-
-# ---------------------------------------------------------------- 全局管理器
+# ---------------------------------------------------------------- global manager
 
 class WatchManager:
-    """进程级 WatchService 管理器（API / lifespan 共用单例）。"""
+    """Process-level WatchService manager (shared singleton for API / lifespan)."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._service: Optional[WatchService] = None
 
     def start(self) -> dict:
@@ -168,7 +177,7 @@ class WatchManager:
         from app.kernel.trigger_rules import parse_rules_config
         from app.notifier import build_notifiers
 
-        checked = get_tools()._check_path(settings.log_path)  # 白名单 fail-closed
+        checked = get_tools()._check_path(settings.log_path)  # whitelist, fail-closed
         rules = parse_rules_config(settings.watch_rules_config)
         watcher = LogWatcher(
             str(checked),

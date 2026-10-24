@@ -1,0 +1,15 @@
+# Ruff configuration for moray-aio (Python 3.8+ compatible codebase)
+target-version = "py38"
+line-length = 160
+
+[lint]
+select = ["E", "F", "W"]
+ignore = [
+  "E501",  # line length is handled by review, not enforced (comments/URLs can be long)
+]
+
+[lint.per-file-ignores]
+# tests build dynamic fixtures and keep deliberate sleeps
+"tests/*" = ["E402"]
+# scripts are standalone entry points that adjust sys.path before imports
+"scripts/*" = ["E402"]

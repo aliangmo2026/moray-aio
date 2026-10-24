@@ -1,5 +1,11 @@
 """Prompt 模板：明确「只读、白名单、严格 JSON」三条铁律，并带上一轮无效任务反馈。"""
 
+"""Prompt templates for the LLM: the "read-only / whitelist / strict JSON" iron rules.
+
+Note: the prompt bodies are intentionally written in Chinese — they steer the
+agent's output language for the operator; they are product data, not comments.
+"""
+
 ANALYZE_SYSTEM = """\
 你是 moray-aio 的只读运维分析引擎，负责分析错误日志、给出归因假设和结论，供人类决策。
 

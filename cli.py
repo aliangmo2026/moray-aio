@@ -1,14 +1,16 @@
 #!/usr/bin/env python
-"""moray-aio 命令行入口（仅标准库，无需启动 HTTP 即可使用）。
+"""moray-aio command line entry point (standard library only).
 
-用法：
-    python cli.py serve [--host H] [--port P]     启动 FastAPI 服务
+Usage:
+    python cli.py serve [--host H] [--port P]     Start the FastAPI service
     python cli.py run --trigger recent_errors --auto-approve
-                                                  直接跑一次完整分析（不经 HTTP），终端彩色输出
-    python cli.py health [--url URL]              检查服务状态
+                                                  Run one full analysis without HTTP,
+                                                  printing a colored terminal report
+    python cli.py health [--url URL]              Check the service status
+    python cli.py watch [--log-path PATH]         Event-driven watch mode (Ctrl+C to stop)
 
-run 的配置全部来自 MORAY_AIO_* 环境变量（同服务）；输出使用纯 ANSI 转义码，
-设置 NO_COLOR=1 可关闭颜色。
+``run`` reads the MORAY_AIO_* environment variables (same as the service).
+Output uses plain ANSI escapes; set NO_COLOR=1 to disable colors.
 """
 
 from __future__ import annotations
@@ -18,12 +20,13 @@ import dataclasses
 import json
 import os
 import sys
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 DEFAULT_URL = "http://127.0.0.1:8020"
-# health 命令的连接目标白名单：只允许连本机 moray-aio 服务
+# Connection allowlist for the health command: only the local moray-aio service
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 _ANSI = {"bold": "1", "red": "31", "green": "32", "yellow": "33", "cyan": "36", "dim": "2"}
@@ -36,22 +39,25 @@ def paint(text: str, style: str) -> str:
 
 
 def validate_base_url(base_url: str) -> str:
-    """仅接受 origin-only 的 http/https 且主机在本机白名单内；返回规范化 origin。"""
+    """Accept http/https origin-only URLs whose host is in the local allowlist;
+    returns the normalized origin."""
     parts = urlsplit(str(base_url).strip())
     scheme = (parts.scheme or "").lower()
     host = (parts.hostname or "").lower()
     if scheme not in ("http", "https"):
-        raise SystemExit("url 只允许 http/https：{!r}".format(base_url))
+        raise SystemExit("url must be http/https: {!r}".format(base_url))
     if not host or host not in ALLOWED_HOSTS:
         raise SystemExit(
-            "health 只允许连接本机服务 {}，收到：{!r}".format(sorted(ALLOWED_HOSTS), base_url)
+            "health only connects to the local service {}; got {!r}".format(
+                sorted(ALLOWED_HOSTS), base_url
+            )
         )
     if parts.username or parts.password or parts.query or parts.fragment or parts.path not in ("", "/"):
-        raise SystemExit("url 必须是 origin-only：{!r}".format(base_url))
+        raise SystemExit("url must be origin-only: {!r}".format(base_url))
     try:
         port = parts.port
     except ValueError:
-        raise SystemExit("url 端口非法：{!r}".format(base_url))
+        raise SystemExit("invalid url port: {!r}".format(base_url))
     host_repr = "[{}]".format(host) if ":" in host else host
     if port:
         return "{}://{}:{}".format(scheme, host_repr, port)
@@ -67,7 +73,7 @@ def cmd_serve(args) -> int:
 
     host = args.host or settings.host
     port = args.port or settings.port
-    print(paint("moray-aio 服务启动: http://{}:{}".format(host, port), "cyan"))
+    print(paint("moray-aio service starting: http://{}:{}".format(host, port), "cyan"))
     uvicorn.run("app.main:app", host=host, port=port, reload=False)
     return 0
 
@@ -108,7 +114,7 @@ def cmd_run(args) -> int:
         auto_approve_readonly=s.auto_approve_readonly,
     )
 
-    print(paint("== moray-aio run（trigger={}）==".format(args.trigger), "bold"))
+    print(paint("== moray-aio run (trigger={}) ==".format(args.trigger), "bold"))
     ep = loop.start(trigger=args.trigger)
     _print_report(ep)
 
@@ -122,7 +128,12 @@ def _print_report(ep) -> None:
     style = "green" if phase == "concluded" else ("red" if phase == "failed" else "yellow")
     print()
     print(paint("episode: {}".format(ep.id), "dim"))
-    print(paint("phase: {}   iteration: {}   tasks: {}".format(phase, ep.iteration, len(ep.tasks)), style))
+    print(
+        paint(
+            "phase: {}   iteration: {}   tasks: {}".format(phase, ep.iteration, len(ep.tasks)),
+            style,
+        )
+    )
 
     if ep.trace:
         print()
@@ -169,7 +180,7 @@ def _print_report(ep) -> None:
 
     if ep.analysis:
         print()
-        print(paint("-- 分析 --", "bold"))
+        print(paint("-- analysis --", "bold"))
         summary = (ep.analysis or {}).get("summary")
         if summary:
             print("  " + str(summary))
@@ -177,9 +188,9 @@ def _print_report(ep) -> None:
             print("  - " + str(cause))
 
     print()
-    print(paint("结论: {}".format(ep.conclusion or "(无)"), "cyan"))
+    print(paint("Conclusion: {}".format(ep.conclusion or "(none)"), "cyan"))
     if ep.error:
-        print(paint("错误: {}".format(ep.error), "red"))
+        print(paint("Error: {}".format(ep.error), "red"))
 
 
 # ---------------------------------------------------------------- health
@@ -195,46 +206,54 @@ def cmd_health(args) -> int:
         with urlopen(req, timeout=10) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except HTTPError as exc:
-        print(paint("health 检查失败: HTTP {}".format(exc.code), "red"))
+        print(paint("health check failed: HTTP {}".format(exc.code), "red"))
         return 1
     except (URLError, OSError) as exc:
-        print(paint("无法连接 {}: {}".format(origin, exc), "red"))
-        print("请确认服务已启动：python cli.py serve")
+        print(paint("cannot reach {}: {}".format(origin, exc), "red"))
+        print("Make sure the service is running: python cli.py serve")
         return 1
 
     print(paint("== moray-aio health ==", "bold"))
-    print("  status:  " + paint(str(body.get("status")), "green" if body.get("status") == "ok" else "red"))
+    print(
+        "  status:  "
+        + paint(str(body.get("status")), "green" if body.get("status") == "ok" else "red")
+    )
     print("  version: {}".format(body.get("version")))
     log = body.get("log") or {}
     log_style = "green" if log.get("readable") else "yellow"
-    print("  log:     " + paint(
-        "{} exists={} readable={} size={}".format(
-            log.get("path"), log.get("exists"), log.get("readable"), log.get("size_bytes")
-        ),
-        log_style,
-    ))
+    print(
+        "  log:     "
+        + paint(
+            "{} exists={} readable={} size={}".format(
+                log.get("path"), log.get("exists"), log.get("readable"), log.get("size_bytes")
+            ),
+            log_style,
+        )
+    )
     ollama = body.get("ollama") or {}
     ollama_style = "green" if ollama.get("available") else "yellow"
-    print("  ollama:  " + paint(
-        "available={} model={}".format(ollama.get("available"), ollama.get("model")), ollama_style
-    ))
+    print(
+        "  ollama:  "
+        + paint(
+            "available={} model={}".format(ollama.get("available"), ollama.get("model")),
+            ollama_style,
+        )
+    )
     return 0
 
 
 # ---------------------------------------------------------------- watch
 
 def cmd_watch(args) -> int:
-    """直接启动 Watch 模式（不起 FastAPI）：日志变化 → 规则触发 → 终端彩色告警。"""
-    import time as _time
-
+    """Watch mode without FastAPI: log changes -> rules -> colored terminal alerts."""
     from app.config import Settings
     from app.kernel.loop import EvolutionLoop
     from app.kernel.sqlite_repository import Memory
     from app.kernel.trigger_rules import parse_rules_config
     from app.kernel.watch_service import WatchService
     from app.kernel.watcher import LogWatcher
-    from app.notifier import build_notifiers
     from app.llm.ollama_client import OllamaClient
+    from app.notifier import build_notifiers
     from app.tools.registry import ToolRegistry
 
     s = Settings()
@@ -247,7 +266,7 @@ def cmd_watch(args) -> int:
         plugin_dirs=s.plugin_dirs,
     )
     log_path = args.log_path or s.log_path
-    checked = tools._check_path(str(log_path))  # 白名单 fail-closed
+    checked = tools._check_path(str(log_path))  # whitelist, fail-closed
     memory = Memory(s.memory_db_path)
     llm = OllamaClient(
         s.ollama_url, s.ollama_model, s.ollama_timeout, allowed_hosts=s.ollama_allowed_hosts
@@ -255,8 +274,11 @@ def cmd_watch(args) -> int:
     loop = EvolutionLoop(
         settings=s, memory=memory, tools=tools, llm=llm, auto_approve_readonly=True
     )
-    watcher = LogWatcher(str(checked), on_lines=lambda lines: None,
-                         poll_interval=s.watch_poll_interval_seconds)
+    watcher = LogWatcher(
+        str(checked),
+        on_lines=lambda lines: None,
+        poll_interval=s.watch_poll_interval_seconds,
+    )
     service = WatchService(
         log_path=str(checked),
         rules=parse_rules_config(s.watch_rules_config),
@@ -267,45 +289,48 @@ def cmd_watch(args) -> int:
     )
 
     print(paint("== moray-aio watch ==", "bold"))
-    print("  监听文件: {}".format(checked))
-    print("  轮询间隔: {}s   规则: {}".format(
-        s.watch_poll_interval_seconds, ", ".join(service.engine.fire_count)))
-    print(paint("  按 Ctrl+C 优雅退出", "dim"))
+    print("  watching: {}".format(checked))
+    print(
+        "  poll interval: {}s   rules: {}".format(
+            s.watch_poll_interval_seconds, ", ".join(service.engine.fire_count)
+        )
+    )
+    print(paint("  press Ctrl+C to stop", "dim"))
     service.start()
     try:
         while True:
-            _time.sleep(1)
+            time.sleep(1)
     except KeyboardInterrupt:
-        print(paint("\n收到 Ctrl+C，停止监听...", "yellow"))
+        print(paint("\nCtrl+C received, stopping...", "yellow"))
     finally:
         service.stop()
-        print(paint("已停止。notifications_sent={}".format(service.notifications_sent), "dim"))
+        print(paint("stopped. notifications_sent={}".format(service.notifications_sent), "dim"))
     return 0
 
 
 # ---------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="moray-aio", description="只读 AIOps 分析引擎 CLI")
+    parser = argparse.ArgumentParser(prog="moray-aio", description="Read-only AIOps agent CLI")
     sub = parser.add_subparsers(dest="command")
 
-    p_serve = sub.add_parser("serve", help="启动 FastAPI 服务")
+    p_serve = sub.add_parser("serve", help="Start the FastAPI service")
     p_serve.add_argument("--host", default=None)
     p_serve.add_argument("--port", type=int, default=None)
     p_serve.set_defaults(func=cmd_serve)
 
-    p_run = sub.add_parser("run", help="直接跑一次完整分析（不经 HTTP）")
+    p_run = sub.add_parser("run", help="Run one full analysis without HTTP")
     p_run.add_argument("--trigger", default="recent_errors")
-    p_run.add_argument("--auto-approve", action="store_true", help="自动批准只读任务")
+    p_run.add_argument("--auto-approve", action="store_true", help="Auto-approve read-only tasks")
     p_run.add_argument("--max-iterations", type=int, default=None)
     p_run.set_defaults(func=cmd_run)
 
-    p_health = sub.add_parser("health", help="检查服务状态")
-    p_health.add_argument("--url", default=None, help="服务地址（默认 {}）".format(DEFAULT_URL))
+    p_health = sub.add_parser("health", help="Check the service status")
+    p_health.add_argument("--url", default=None, help="Service URL (default {})".format(DEFAULT_URL))
     p_health.set_defaults(func=cmd_health)
 
-    p_watch = sub.add_parser("watch", help="启动日志监听（事件驱动自动分析并告警）")
-    p_watch.add_argument("--log-path", default=None, help="被监听日志（默认 settings.log_path）")
+    p_watch = sub.add_parser("watch", help="Event-driven watch mode (auto analysis + alerts)")
+    p_watch.add_argument("--log-path", default=None, help="Log to watch (default settings.log_path)")
     p_watch.set_defaults(func=cmd_watch)
 
     return parser

@@ -1,12 +1,14 @@
-"""SQLite 仓储实现（默认轻量级/单机模式）。
+"""SQLite repository implementation (default lightweight / single-node mode).
 
-原 app/kernel/memory.py 整体迁移到本文件；SQL 一律参数绑定（?），
-连接级 threading.Lock 保证 HTTP 线程与后台线程并发安全。
+Migrated from the former app/kernel/memory.py. All SQL is parameterized (?),
+and a connection-level threading.Lock serializes concurrent access from HTTP
+and background worker threads.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -23,9 +25,10 @@ from app.kernel.state import Episode
 
 
 class SqliteEpisodeRepository(EpisodeRepository):
-    """SQLite 持久化。父目录不存在则自动创建；全部操作经连接级锁串行化。"""
+    """SQLite persistence. Creates parent directories automatically;
+    every operation goes through the connection-level lock."""
 
-    def __init__(self, db_path: Union[str, "os.PathLike"]):
+    def __init__(self, db_path: Union[str, os.PathLike]):
         self.db_path = Path(db_path)
         parent = self.db_path.parent
         if str(parent) and not parent.exists():
@@ -72,6 +75,8 @@ class SqliteEpisodeRepository(EpisodeRepository):
                 )
 
     def save(self, ep: Episode) -> None:
+        """Upsert by id; created_at keeps the original creation time;
+        refreshes the episodes_index keyword row."""
         payload = json.dumps(ep.to_dict(), ensure_ascii=False)
         keywords = extract_keywords(
             [
@@ -167,13 +172,15 @@ class SqliteEpisodeRepository(EpisodeRepository):
             rows = self._conn.execute(
                 "SELECT episode_id, keywords, conclusion FROM episodes_index"
             ).fetchall()
-        return rank_similar(rows, keywords, top_k=top_k, threshold=threshold,
-                            exclude_episode_id=exclude_episode_id)
+        return rank_similar(
+            rows, keywords, top_k=top_k, threshold=threshold,
+            exclude_episode_id=exclude_episode_id,
+        )
 
     def close(self) -> None:
         with self._lock:
             self._conn.close()
 
 
-# 向后兼容别名（v0.6.0 起 memory.py 迁移为 sqlite_repository.py）
+# Backward-compatible alias (since v0.6.0 memory.py migrated to sqlite_repository.py)
 Memory = SqliteEpisodeRepository
