@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.kernel.loop import EvolutionLoop
-from app.kernel.memory import Memory
+from app.kernel.sqlite_repository import Memory
 from app.tools.registry import ToolRegistry
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -157,6 +157,8 @@ def test_ollama_usage_extraction(monkeypatch):
     from app.llm import ollama_client as oc
 
     class _FakeResp:
+        status_code = 200
+
         def raise_for_status(self):
             return None
 
@@ -172,7 +174,7 @@ def test_ollama_usage_extraction(monkeypatch):
 
     result = client._generate("p", "s")
     assert result["summary"] == "s"
-    assert client.take_last_usage() == {"prompt_tokens": 12, "completion_tokens": 34}
+    assert client.take_last_usage() == {"prompt_tokens": 12, "completion_tokens": 34, "retries": 0}
     assert client.take_last_usage() is None  # 取走即清空，避免跨阶段重复归因
 
 

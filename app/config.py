@@ -33,7 +33,7 @@ class Settings:
     """只读配置。默认值面向 MoRay 主项目，可用 MORAY_AIO_* 环境变量覆盖。"""
 
     app_name: str = "moray-aio"
-    version: str = "0.5.0"
+    version: str = "0.6.0"
 
     # HTTP 服务
     host: str = field(default_factory=lambda: _env_str("MORAY_AIO_HOST", "127.0.0.1"))
@@ -105,6 +105,16 @@ class Settings:
     plugin_dirs_raw: str = field(
         default_factory=lambda: _env_str("MORAY_AIO_PLUGIN_DIRS", "")
     )
+
+    # ---- 生产级基础设施（v0.6.0）----
+    # 持久化：DSN 非空 → Postgres；为空 → 默认 SQLite（memory_db_path）
+    db_dsn: str = field(default_factory=lambda: _env_str("MORAY_AIO_DB_DSN", ""))
+    # Token 预算熔断：单个 episode 的 LLM 用量上限，超限立即 FAILED
+    max_tokens_per_episode: int = field(
+        default_factory=lambda: _env_int("MORAY_AIO_MAX_TOKENS_PER_EPISODE", 50000)
+    )
+    # API 鉴权：非空时所有请求（除 GET /health）必须携带 X-API-Key（只从环境变量读取）
+    api_key: str = field(default_factory=lambda: _env_str("MORAY_AIO_API_KEY", ""))
 
     @property
     def readonly_roots(self) -> list:

@@ -10,7 +10,7 @@ import pytest
 
 from app.config import Settings
 from app.kernel.loop import EvolutionLoop
-from app.kernel.memory import Memory
+from app.kernel.sqlite_repository import Memory
 from app.kernel.planner import propose_tasks
 from app.kernel.state import Episode
 from app.llm.ollama_client import OllamaClient

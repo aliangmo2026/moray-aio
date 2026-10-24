@@ -6,15 +6,26 @@ from functools import lru_cache
 
 from app.config import settings
 from app.kernel.loop import EvolutionLoop
-from app.kernel.memory import Memory
+from app.kernel.repository import EpisodeRepository
+from app.kernel.sqlite_repository import SqliteEpisodeRepository
 from app.llm.ollama_client import OllamaClient
 from app.tools.registry import ToolRegistry
 
 
 @lru_cache(maxsize=1)
-def get_memory() -> Memory:
-    """SQLite 长效记忆（episodes + reflections）。"""
-    return Memory(settings.memory_db_path)
+def get_repository() -> EpisodeRepository:
+    """按配置选择仓储：MORAY_AIO_DB_DSN 存在 → Postgres；否则默认 SQLite。"""
+    if settings.db_dsn:
+        from app.kernel.postgres_repository import PostgresEpisodeRepository
+
+        return PostgresEpisodeRepository(settings.db_dsn)
+    return SqliteEpisodeRepository(settings.memory_db_path)
+
+
+@lru_cache(maxsize=1)
+def get_memory() -> EpisodeRepository:
+    """向后兼容别名（v0.6.0 起持久化统一走 EpisodeRepository 接口）。"""
+    return get_repository()
 
 
 @lru_cache(maxsize=1)

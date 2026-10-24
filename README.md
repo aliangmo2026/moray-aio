@@ -36,8 +36,10 @@ E:\moray-aio\
 │   ├── main.py             # FastAPI 入口
 │   ├── api\routes.py       # HTTP 接口
 │   ├── kernel\             # 自我迭代内核
-│   │   ├── state.py        # Phase 枚举 + Episode + 合法转移表
-│   │   ├── memory.py       # SQLite 长效记忆（参数绑定）
+│   │   ├── state.py        # Phase 枚举 + Episode（含 trace）+ 合法转移表
+│   │   ├── repository.py   # EpisodeRepository 抽象接口 + 共享纯函数
+│   │   ├── sqlite_repository.py  # SQLite 实现（默认单机模式，参数绑定+锁）
+│   │   ├── postgres_repository.py # Postgres 实现（MORAY_AIO_DB_DSN 启用）
 │   │   ├── approval.py     # 审批闸门（classify/decide）
 │   │   ├── planner.py      # 自驱任务生成（LLM 优先 / 启发式兜底）
 │   │   └── loop.py         # 主循环 Observe→Analyze→Propose→(审批)→Execute
@@ -114,6 +116,10 @@ $env:MORAY_AIO_LOG_PATH       = "C:\temp\demo-logs\moray.err.log"
 | GET | `/memory/similar?keywords=a,b,c` | 按关键词检索历史相似 episode（Jaccard，只读调试） |
 
 交互文档：服务启动后访问 `/docs`（Swagger UI）。
+
+**API 鉴权**：设置 `MORAY_AIO_API_KEY` 后，除 `GET /health` 外所有请求必须携带
+`X-API-Key` 头（401 否则）；留空则鉴权关闭（本地调试）。客户端侧
+`scripts/moray_client.py` / `scripts/demo.py` / `cli.py` 会自动从环境变量带上该头。
 
 ## 一键演示
 
@@ -217,12 +223,31 @@ risk_level/params_schema + `invoke(params)` 单字典入口）；8 个内置工�
 **4. Docker**。Dockerfile（python:3.10-slim、非 root、依赖层缓存）+ docker-compose.yml
 （日志目录只读挂载、端口只绑 127.0.0.1）。
 
+## v0.6.0：生产级基础设施
+
+**1. Repository 持久化抽象**。`app/kernel/repository.py` 定义 `EpisodeRepository` 接口
+（save/load/list_recent/metrics/record_reflection/find_similar...）；原 memory.py 迁移为
+`sqlite_repository.py`（默认单机模式），新增 `postgres_repository.py`（配置
+`MORAY_AIO_DB_DSN` 启用，依赖 `requirements-optional.txt`）。关键词提取/相似度/指标聚合
+下沉为共享纯函数，两实现复用；所有 SQL 参数绑定。
+
+**2. Token 预算熔断**。`MORAY_AIO_MAX_TOKENS_PER_EPISODE`（默认 50000）限制单 episode
+LLM 用量；analyze/propose 每次调用后累计，超限立即 `FAILED`（error=
+`Token budget exceeded: {used} / {max}`），trace 记录 `circuit_break` 事件，同步/异步同受保护。
+
+**3. API Key 鉴权**。`MORAY_AIO_API_KEY` 非空时中间件拦截所有请求（`GET /health` 除外），
+`X-API-Key` 不匹配返回 401（常量时间比较）；密钥只从环境变量读取。
+
+**4. 网络重试**。Ollama 调用带指数退避（1s/2s/4s，最多 3 次）：网络超时/连接错误/5xx 重试，
+4xx 不重试直接抛出；重试次数进 trace（`llm.retries`）与日志。
+
 ## 版本
 
 - **v0.2.0**（tag）：MVP——Ollama 接入、自我迭代内核、批量审批、demo CLI。
 - **v0.3.0**（tag）：异步 episodes、日志滚动聚合、错误聚类，面向 MoRay 主项目 HTTP 接入就绪。
 - **v0.4.0**（tag）：只读系统探针、planner 智能派发、历史相似案例检索。
 - **v0.5.0**（tag）：trace/metrics 可观测性、BaseTool 插件化、CLI、Docker。
+- **v0.6.0**（tag）：Repository 抽象（SQLite/Postgres）、Token 熔断、API 鉴权、网络重试。
 
 ## Episode 生命周期
 

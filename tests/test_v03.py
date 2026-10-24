@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.kernel.loop import EvolutionLoop
-from app.kernel.memory import Memory
+from app.kernel.sqlite_repository import Memory
 from app.kernel.state import Episode, Phase
 from app.tools.clusterer import cluster, normalize
 from app.tools.log_reader import LogReadError, read_rolling

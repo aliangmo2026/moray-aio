@@ -77,7 +77,7 @@ def cmd_serve(args) -> int:
 def cmd_run(args) -> int:
     from app.config import Settings
     from app.kernel.loop import EvolutionLoop
-    from app.kernel.memory import Memory
+    from app.kernel.sqlite_repository import Memory
     from app.kernel.state import Phase
     from app.llm.ollama_client import OllamaClient
     from app.tools.registry import ToolRegistry
@@ -186,7 +186,11 @@ def _print_report(ep) -> None:
 
 def cmd_health(args) -> int:
     origin = validate_base_url(args.url or DEFAULT_URL)
-    req = Request(origin + "/health", method="GET")
+    headers = {}
+    api_key = os.environ.get("MORAY_AIO_API_KEY", "").strip()
+    if api_key:
+        headers["X-API-Key"] = api_key
+    req = Request(origin + "/health", method="GET", headers=headers)
     try:
         with urlopen(req, timeout=10) as resp:
             body = json.loads(resp.read().decode("utf-8"))

@@ -14,8 +14,8 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from app.kernel import approval
-from app.kernel.memory import extract_keywords
 from app.kernel.planner import propose_tasks
+from app.kernel.repository import extract_keywords
 from app.kernel.state import Episode, Phase
 from app.tools import clusterer, log_reader
 
@@ -190,9 +190,13 @@ class EvolutionLoop:
             if ep.phase != Phase.ANALYZING:
                 ep.transition(Phase.ANALYZING)
             self._timed(ep, "analyze", self._analyze, ep)
+            if self._break_on_token_budget(ep):
+                return
 
             ep.transition(Phase.PROPOSING)
             new_tasks = self._timed(ep, "propose", self._propose, ep)
+            if self._break_on_token_budget(ep):
+                return
             if any(t.get("status") == "proposed" for t in new_tasks):
                 ep.transition(Phase.AWAITING_APPROVAL)
                 self.memory.save(ep)
@@ -205,6 +209,38 @@ class EvolutionLoop:
             self._timed(ep, "execute", self._execute_approved, ep)
 
         self._conclude(ep)
+
+    def _break_on_token_budget(self, ep: Episode) -> bool:
+        """Token 预算熔断：累计 LLM 用量超限 → 立即 FAILED 并记录熔断 trace 事件。
+
+        同步/异步模式共用 _iterate，因此两条路径都受此保护。
+        """
+        used = 0
+        for entry in ep.trace:
+            usage = entry.get("llm") or {}
+            used += int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+        limit = int(getattr(self.settings, "max_tokens_per_episode", 50000))
+        if used <= limit:
+            return False
+        ep.error = "Token budget exceeded: {} / {}".format(used, limit)
+        ep.trace.append(
+            {
+                "stage": "circuit_break",
+                "iteration": ep.iteration,
+                "phase": ep.phase.value,
+                "timestamp": _now(),
+                "duration_ms": 0.0,
+                "llm": None,
+                "detail": {"used_tokens": used, "max_tokens": limit},
+            }
+        )
+        if ep.phase not in (Phase.CONCLUDED, Phase.FAILED):
+            try:
+                ep.transition(Phase.FAILED)
+            except ValueError:
+                pass
+        self.memory.save(ep)
+        return True
 
     def _observe(self, ep: Episode) -> None:
         log_dir = str(getattr(self.settings, "log_dir", "") or "").strip()

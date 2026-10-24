@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.kernel.loop import EvolutionLoop
-from app.kernel.memory import Memory
+from app.kernel.sqlite_repository import Memory
 from app.tools.registry import ToolRegistry
 
 RICH_LOG = "\n".join(

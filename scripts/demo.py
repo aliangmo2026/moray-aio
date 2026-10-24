@@ -31,6 +31,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from moray_client import build_headers
+
 DEFAULT_BASE_URL = "http://127.0.0.1:8020"
 # 演示脚本的连接目标白名单：只允许连本机 moray-aio 服务
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -95,9 +97,9 @@ def validate_base_url(base_url: str) -> str:
 
 
 def api(origin, method, path, payload=None):
-    """调用一次 HTTP 接口；HTTPError 时打印 detail 并返回 None。"""
+    """调用一次 HTTP 接口（自动携带 X-API-Key）；HTTPError 时打印 detail 并返回 None。"""
     data = None
-    headers = {}
+    headers = build_headers()
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
