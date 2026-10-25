@@ -6,25 +6,41 @@ on:
   pull_request:
 
 jobs:
-  test:
+  test-py38:
+    # Python 3.8 is EOL and no longer shipped in modern runner tool caches
+    # (ubuntu-latest is 24.04+), which made setup-python fail fast (~22s).
+    # Running inside a python:3.8 container (git preinstalled) makes this job
+    # immune to future ubuntu-latest upgrades.
+    name: test (python 3.8, containerized)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.8", "3.10"]
+    container: python:3.8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+      - name: Lint (ruff)
+        run: python -m ruff check .
+      - name: Run tests
+        run: python -m pytest -q
+
+  test-py310:
+    name: test (python 3.10)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.10"
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          python -m pip install -r requirements-dev.txt
       - name: Lint (ruff)
-        run: ruff check .
+        run: python -m ruff check .
       - name: Run tests
-        run: pytest -q
+        run: python -m pytest -q
 
   docker:
     runs-on: ubuntu-latest
