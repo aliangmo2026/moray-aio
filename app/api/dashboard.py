@@ -1,15 +1,20 @@
-"""Visualization console: single-page HTML + aggregated data endpoint
-(geek-styled, information-dense, zero build-step dependencies)."""
+"""Visualization console: single-page HTML, aggregated data endpoint and the SSE
+live stream (geek-styled, information-dense, zero build-step dependencies)."""
 
 from __future__ import annotations
 
+import asyncio
+import json
+import queue
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import AsyncIterator
 
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from app.deps import get_loop, get_memory
+from app.kernel.events import EVENT_BUS
 
 dashboard_router = APIRouter()
 
@@ -59,3 +64,52 @@ def dashboard_data():
         "episodes": episodes,
         "watch": watch,
     }
+
+
+# ---------------------------------------------------------------- SSE live stream
+
+async def _sse_generator(subscriber: "queue.Queue", is_disconnected) -> AsyncIterator[str]:
+    """SSE frame generator: hello, then bus events; `: heartbeat` when idle.
+
+    Kept endpoint-agnostic (``is_disconnected`` is injectable) so tests can drive
+    it without an HTTP stack; production passes ``request.is_disconnected``.
+    """
+    try:
+        yield "event: hello\ndata: {}\n\n".format(json.dumps({"ok": True}))
+        while True:
+            if await is_disconnected():
+                break
+            delivered = 0
+            while True:
+                try:
+                    event_type, payload = subscriber.get_nowait()
+                except queue.Empty:
+                    break
+                delivered += 1
+                yield "event: {}\ndata: {}\n\n".format(
+                    event_type, json.dumps(payload, ensure_ascii=False)
+                )
+            if delivered == 0:
+                yield ": heartbeat\n\n"
+            await asyncio.sleep(1)
+    finally:
+        EVENT_BUS.unsubscribe(subscriber)
+
+
+@dashboard_router.get("/api/stream")
+async def stream(request: Request) -> StreamingResponse:
+    """Server-Sent Events live stream: log captures, rule fires, phase transitions.
+
+    Event types: hello (on connect), log_captured, rule_fired, episode_phase, alert.
+    Idle cycles emit `: heartbeat` comment lines so proxies keep the connection open.
+    """
+    subscriber = EVENT_BUS.subscribe()
+    return StreamingResponse(
+        _sse_generator(subscriber, request.is_disconnected),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

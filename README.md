@@ -2,18 +2,73 @@
 
 > An event-driven, physically-sandboxed, local-LLM powered AIOps agent for production.
 
+**English** · moray-aio watches your logs in real time, triggers analysis on error
+bursts/critical keywords/error spikes, runs a *strictly read-only* investigation
+loop (log grep + system probes) driven by a local LLM (Ollama, heuristic fallback),
+and pushes conclusions to your terminal, webhook or file — with per-episode token
+budgets, API-key auth, rate limiting, tracing/metrics, a live SSE console and a
+one-command install. It never writes, truncates, restarts or deletes anything:
+dangerous actions only ever appear as suggestion text. Built for teams that want
+AI-assisted ops without giving an agent a root shell.
+
+<!-- GIF demo placeholder: record the live console (append an ERROR to a watched
+     log -> watcher captures it -> rule fires -> episode runs -> alert lands in
+     the terminal panel while cards animate), save as docs/assets/demo.gif and
+     uncomment the line below. -->
+<!-- ![moray-aio live demo](docs/assets/demo.gif) -->
+
 ![Build Passing](https://img.shields.io/badge/build-passing-brightgreen)
 ![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
 ![Docker ready](https://img.shields.io/badge/docker-ready-blue)
 ![License MIT](https://img.shields.io/badge/license-MIT-green)
 
-基于本地大模型（Ollama）的 **AIOps 智能运维 Agent**，定位是「**只读分析、辅助决策**」。
+**中文** · 基于本地大模型（Ollama）的 **AIOps 智能运维 Agent**，定位是「**只读分析、辅助决策**」。
 事件驱动：主动监听日志 → 规则触发 → 自驱分析 → Webhook 告警；独立引擎通过 HTTP 供外部系统接入。
+
+## Quick Start (one command)
+
+```bash
+# Linux / macOS
+bash install.sh && make dev
+```
+
+```powershell
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -File install.ps1; .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8020
+```
+
+Then open <http://127.0.0.1:8020/dashboard> (dark console + live SSE terminal) or run
+`python cli.py run --auto-approve` for one full analysis straight in the terminal.
 
 ![moray-aio dashboard](docs/assets/dashboard.png)
 <!-- Screenshot: start the service, open http://127.0.0.1:8020/dashboard —
-     dark console with metric cards, episode list and the trace waterfall.
-     Capture it and save as docs/assets/dashboard.png. -->
+     dark console with metric cards, episode list, the trace waterfall and the
+     live terminal console. Capture it and save as docs/assets/dashboard.png. -->
+
+## Real-World Log Test (multiline stack traces)
+
+Real errors span lines — Java/Python stack traces would be shredded by naive
+line-by-line reading. moray-aio folds continuation lines (leading whitespace or
+`at com.x.y(...)` frames) back into the previous record, so one ERROR stays one
+record through watching, clustering and analysis:
+
+```text
+# raw log (6 lines)
+2026-10-24 14:20:01 ERROR worker crashed id=a1b2c3d4e5
+    at com.moray.worker.JobRunner.run(JobRunner.java:88)
+    at java.base/java.lang.Thread.run(Thread.java:829)
+2026-10-24 14:20:02 ERROR worker crashed id=b2c3d4e5f6
+    at com.moray.worker.JobRunner.run(JobRunner.java:88)
+    at java.base/java.lang.Thread.run(Thread.java:829)
+
+# after group_multiline + clustering -> ONE template, count=2
+<TS> ERROR worker crashed id=<HEX>
+```
+
+The watcher even carries a trailing stack across poll boundaries (frames arriving
+in the next chunk merge into the same record), and clustering normalizes the whole
+record through a single precompiled regex pass — 1.44M lines fold into 4 templates
+in ~68s (see [docs/benchmark.md](docs/benchmark.md)).
 
 ## 核心能力（本阶段 MVP）
 
@@ -297,14 +352,18 @@ flowchart TD
 (awaiting_approval ⇄) executing → analyzing → … → concluded`，异常/熔断进入 `failed`。
 任务状态：`proposed → approved/rejected → done/failed/empty`（empty 会反馈给下一轮规划纠错）。
 
-## 可视化控制台（Dashboard）
+## 可视化控制台（Dashboard + Live SSE）
 
 `GET /dashboard` 打开单页控制台（Alpine.js + Tailwind CDN，零构建依赖）：
 暗色高密度布局，顶部指标卡（episodes / success rate / tokens / watch 呼吸灯），
 左侧 Episode 列表，右侧 **Trace 瀑布图**（observe/analyze/propose/execute 耗时横条、
 token 标注 `1115 prompt / 393 completion`、`circuit_break` 红色高亮）。
-数据来自 `GET /api/dashboard/data`（metrics + 最近 20 个 episode + watch 状态）；
-配置了 API Key 时用 `http://127.0.0.1:8020/dashboard?api_key=...` 访问（前端自动带 header）。
+
+**实时流**：`GET /api/stream`（SSE）推送 `hello` / `log_captured` / `rule_fired` /
+`episode_phase` / `alert` 事件；前端用 `EventSource` 驱动底部 **Live Terminal 面板**
+（实时滚动打印捕获的日志与状态流转）、Episode 列表平滑插入动画和指标卡数字跳动。
+数据快照来自 `GET /api/dashboard/data`；配置 API Key 时用
+`http://127.0.0.1:8020/dashboard?api_key=...` 访问（前端自动带 header）。
 
 ## Safety by Design
 

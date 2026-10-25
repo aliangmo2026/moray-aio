@@ -206,3 +206,33 @@ def check_readable(log_path: PathLike) -> dict:
         "readable": readable,
         "size_bytes": size_bytes,
     }
+
+
+# ---------------------------------------------------------------- multiline records
+
+# A continuation line starts with whitespace, or is a stack frame like "at com.x.y(...)".
+# Real ERROR entries (Java/Python stack traces) span multiple lines; these get folded
+# back into the previous record instead of being shred into pieces.
+CONTINUATION_RE = re.compile(r"^(?:[ \t]|\s*at\s)")
+
+_MAX_RECORD_BYTES = 16384
+
+
+def group_multiline(lines: List[str], max_record_bytes: int = _MAX_RECORD_BYTES) -> List[str]:
+    """Merge continuation lines (leading whitespace / "at ..." frames) into the
+    previous record, keeping multi-line stack traces whole.
+
+    Records are joined with newlines; a record that would exceed
+    ``max_record_bytes`` starts a new one instead (memory safety).
+    """
+    records: List[str] = []
+    for line in lines:
+        if (
+            records
+            and CONTINUATION_RE.match(line)
+            and len(records[-1]) + len(line) < max_record_bytes
+        ):
+            records[-1] += "\n" + line
+        else:
+            records.append(line)
+    return records

@@ -2,6 +2,10 @@
 
 normalize() replaces timestamps/IPs/ports/UUIDs/hex strings/numbers with placeholders;
 cluster() counts templates and returns the top_n classes (each with a sample line).
+
+Performance: normalization runs ONE precompiled alternation pass (instead of six
+sequential ``.sub`` calls), which matters at million-line scale — every pattern is a
+module-level ``re.Pattern`` compiled exactly once at import.
 """
 
 from __future__ import annotations
@@ -10,32 +14,30 @@ import re
 from collections import Counter
 from typing import List, Optional
 
-# Order matters: long patterns first (timestamp/UUID/IP/HEX), bare digits last
-_TS = re.compile(
-    r"\d{4}-\d{1,2}-\d{1,2}[T ]\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+# Single combined pattern; alternative order preserves the original semantics:
+# timestamps/UUIDs/IPs first, then port (only after ':'), then hex (not all-digits),
+# and bare digits last.
+_COMBINED_RE = re.compile(
+    r"(?P<ts>\d{4}-\d{1,2}-\d{1,2}[T ]\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)"
+    r"|(?P<uuid>\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b)"
+    r"|(?P<ip>\b\d{1,3}(?:\.\d{1,3}){3}\b)"
+    r"|(?P<port>(?<=:)\d{1,5}\b)"
+    r"|(?P<hex>\b(?![0-9]+\b)[0-9a-fA-F]{6,}\b)"
+    r"|(?P<num>\d+)"
 )
-_UUID = re.compile(
-    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
-)
-_IP = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
-_PORT = re.compile(r"(?<=:)\d{1,5}\b")
-# Hex token (>=6 chars, not all digits — keeps pure numeric IDs out of HEX)
-_HEX = re.compile(r"\b(?![0-9]+\b)[0-9a-fA-F]{6,}\b")
-# Bare digits without boundaries: "104ms" / "cache_881.bin" must fold too;
-# runs after TS/UUID/IP/PORT/HEX so placeholders contain no digits and are safe
-_NUM = re.compile(r"\d+")
+_PLACEHOLDERS = {
+    "ts": "<TS>",
+    "uuid": "<UUID>",
+    "ip": "<IP>",
+    "port": "<PORT>",
+    "hex": "<HEX>",
+    "num": "<NUM>",
+}
 
 
 def normalize(line: str) -> str:
     """Replace volatile fields of a log line with placeholders, producing a template."""
-    text = str(line)
-    text = _TS.sub("<TS>", text)
-    text = _UUID.sub("<UUID>", text)
-    text = _IP.sub("<IP>", text)
-    text = _PORT.sub("<PORT>", text)
-    text = _HEX.sub("<HEX>", text)
-    text = _NUM.sub("<NUM>", text)
-    return text
+    return _COMBINED_RE.sub(lambda m: _PLACEHOLDERS[m.lastgroup], str(line))
 
 
 def cluster(lines: Optional[List[str]], top_n: int = 10) -> List[dict]:

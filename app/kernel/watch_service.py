@@ -14,6 +14,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+from app.kernel.events import publish as publish_event
 from app.kernel.state import Phase
 from app.kernel.trigger_rules import Rule, TriggerEngine
 from app.kernel.watcher import LogWatcher
@@ -61,7 +62,9 @@ class WatchService:
     # ---------- event entry ----------
 
     def feed_lines(self, lines: List[str]) -> None:
-        """Watcher callback: feed lines to the rule engine; fire -> launch an episode."""
+        """Watcher callback: feed lines to the rule engine; fire -> launch an episode.
+        Lines arrive as merged multi-line records (stack traces stay whole)."""
+        publish_event("log_captured", {"lines": [ln[:2000] for ln in lines]})
         for line in lines:
             try:
                 rule = self.engine.feed(line)
@@ -76,6 +79,10 @@ class WatchService:
                     "severity": _severity_for(rule),
                     "lines": self.engine.recent_hits(rule.name, 5),
                 }
+                publish_event(
+                    "rule_fired",
+                    {"rule": rule.name, "episode_id": episode_id, "line": line[:200]},
+                )
                 logger.info("watch rule %s fired -> episode %s", rule.name, episode_id)
             except Exception:
                 logger.exception("watch feed failed (ignored)")
@@ -110,6 +117,7 @@ class WatchService:
         try:
             if self.notifier.notify(title, content, severity):
                 self.notifications_sent += 1
+                publish_event("alert", {"title": title, "severity": severity, "rule": rule_name})
         except Exception:
             logger.exception("notifier failed (isolated)")
 

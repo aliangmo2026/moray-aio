@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Union
 
+from app.kernel.events import publish as publish_event
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -69,7 +71,8 @@ class Episode:
         return cls(id=str(uuid.uuid4()), trigger=trigger, phase=Phase.CREATED)
 
     def transition(self, target: Union[Phase, str]) -> Phase:
-        """Move to the target phase; raises ValueError on any illegal transition."""
+        """Move to the target phase; raises ValueError on any illegal transition.
+        Every transition is published to the event bus (SSE live stream)."""
         if isinstance(target, str):
             target = Phase(target)
         if target not in ALLOWED.get(self.phase, set()):
@@ -78,6 +81,15 @@ class Episode:
             )
         self.phase = target
         self.updated_at = _now()
+        publish_event(
+            "episode_phase",
+            {
+                "episode_id": self.id,
+                "trigger": self.trigger,
+                "phase": self.phase.value,
+                "iteration": self.iteration,
+            },
+        )
         return self.phase
 
     def to_dict(self) -> Dict[str, Any]:
