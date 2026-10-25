@@ -94,8 +94,11 @@ def test_disk_usage_whitelist(tmp_path):
     registry = _registry(tmp_path)
     ok = registry.call("disk_usage", {"path": str(tmp_path)})
     assert ok["total_gb"] > 0 and ok["used_percent"] is not None
+    # platform-neutral negative path: outside the whitelist root on any OS;
+    # the whitelist check fires before any filesystem access
+    outside = str(tmp_path.parent / "outside-whitelist")
     with pytest.raises(PermissionError):
-        registry.call("disk_usage", {"path": "C:\\Windows"})
+        registry.call("disk_usage", {"path": outside})
 
 
 # ---------- planner smart dispatch ----------
