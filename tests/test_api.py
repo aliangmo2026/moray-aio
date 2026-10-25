@@ -57,6 +57,7 @@ def env(tmp_path, monkeypatch):
     from app.api import routes
 
     monkeypatch.setattr(routes, "get_loop", lambda: loop)
+    monkeypatch.setattr(routes, "get_memory", lambda: memory)
     monkeypatch.setattr(routes, "get_llm", lambda: _OfflineLLM())
 
     from app.main import create_app

@@ -8,6 +8,7 @@ and background worker threads.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -34,7 +35,16 @@ class SqliteEpisodeRepository(EpisodeRepository):
         if str(parent) and not parent.exists():
             parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError as exc:
+            # WAL needs shared-memory support that some filesystems lack
+            # (e.g. Windows/macOS Docker bind mounts). Degrade gracefully to
+            # the default journal instead of refusing to start.
+            logging.getLogger("moray_aio.repository").warning(
+                "WAL journal mode unavailable on %s (%s); using default journal",
+                self.db_path, exc,
+            )
         self._lock = threading.Lock()
         self._init_schema()
 
