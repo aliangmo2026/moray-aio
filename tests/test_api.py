@@ -71,8 +71,9 @@ def test_health_includes_ollama_field(env):
     body = resp.json()
     assert body["status"] == "ok"
     assert body["ollama"] == {"available": False, "model": Settings().ollama_model}
-    # /health still probes the real default log path (tmp_path does not touch globals)
-    assert body["log"]["exists"] is False
+    # /health reports the real default log path metadata (environment-agnostic shape)
+    assert set(body["log"]) == {"path", "exists", "readable", "size_bytes"}
+    assert body["log"]["path"] == Settings().log_path
 
 
 def test_approve_all_then_resume_concludes(env):

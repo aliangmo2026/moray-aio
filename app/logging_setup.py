@@ -58,9 +58,15 @@ def _enable_windows_ansi() -> None:
     """Best-effort VT enablement so ANSI colors render on legacy Windows consoles."""
     if os.name == "nt":
         try:
-            os.system("")  # no-op that flips the console into VT processing mode
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            mode = ctypes.c_uint32(0)
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
         except Exception:
-            pass
+            pass  # coloring is cosmetic; never fail startup over it
 
 
 def setup_logging(level: str = "INFO", fmt: str = "auto") -> None:

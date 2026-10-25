@@ -1,5 +1,13 @@
 # moray-aio
 
+> ⚠️ **WARNING: EXPERIMENTAL PROOF-OF-CONCEPT.**
+> This project is an AIOps proof-of-concept. **Do NOT use it directly in core
+> production environments.** The system enforces a "physically read-only, never
+> execute" principle (read-only log access, path/host whitelists, approval gates,
+> no dangerous commands), but the authors assume **no liability for any failures,
+> data loss or incidents caused by using this software**. See
+> [DISCLAIMER.md](DISCLAIMER.md) for the full terms. Use at your own risk.
+
 > An event-driven, physically-sandboxed, local-LLM powered AIOps agent for production.
 
 **English** · moray-aio watches your logs in real time, triggers analysis on error
