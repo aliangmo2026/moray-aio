@@ -1,7 +1,82 @@
 # moray-aio
 
-基于本地大模型（Ollama）的 **AIOps 智能运维 Agent**，定位是「**只读分析、辅助决策**」。
-本仓库是独立引擎（MVP，v0.2.0），未来通过 HTTP 接入主项目 MoRay；本项目**不引用、不修改** MoRay 的任何代码。
+> ⚠️ **WARNING: EXPERIMENTAL PROOF-OF-CONCEPT.**
+> This project is an AIOps proof-of-concept. **Do NOT use it directly in core
+> production environments.** The system enforces a "physically read-only, never
+> execute" principle (read-only log access, path/host whitelists, approval gates,
+> no dangerous commands), but the authors assume **no liability for any failures,
+> data loss or incidents caused by using this software**. See
+> [DISCLAIMER.md](DISCLAIMER.md) for the full terms. Use at your own risk.
+
+> An event-driven, physically-sandboxed, local-LLM powered AIOps agent for production.
+
+**English** · moray-aio watches your logs in real time, triggers analysis on error
+bursts/critical keywords/error spikes, runs a *strictly read-only* investigation
+loop (log grep + system probes) driven by a local LLM (Ollama, heuristic fallback),
+and pushes conclusions to your terminal, webhook or file — with per-episode token
+budgets, API-key auth, rate limiting, tracing/metrics, a live SSE console and a
+one-command install. It never writes, truncates, restarts or deletes anything:
+dangerous actions only ever appear as suggestion text. Built for teams that want
+AI-assisted ops without giving an agent a root shell.
+
+<!-- GIF demo placeholder: record the live console (append an ERROR to a watched
+     log -> watcher captures it -> rule fires -> episode runs -> alert lands in
+     the terminal panel while cards animate), save as docs/assets/demo.gif and
+     uncomment the line below. -->
+<!-- ![moray-aio live demo](docs/assets/demo.gif) -->
+
+![Build Passing](https://img.shields.io/badge/build-passing-brightgreen)
+![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
+![Docker ready](https://img.shields.io/badge/docker-ready-blue)
+![License MIT](https://img.shields.io/badge/license-MIT-green)
+
+**中文** · 基于本地大模型（Ollama）的 **AIOps 智能运维 Agent**，定位是「**只读分析、辅助决策**」。
+事件驱动：主动监听日志 → 规则触发 → 自驱分析 → Webhook 告警；独立引擎通过 HTTP 供外部系统接入。
+
+## Quick Start (one command)
+
+```bash
+# Linux / macOS
+bash install.sh && make dev
+```
+
+```powershell
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -File install.ps1; .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8020
+```
+
+Then open <http://127.0.0.1:8020/dashboard> (dark console + live SSE terminal) or run
+`python cli.py run --auto-approve` for one full analysis straight in the terminal.
+
+![moray-aio dashboard](docs/assets/dashboard.png)
+<!-- Screenshot: start the service, open http://127.0.0.1:8020/dashboard —
+     dark console with metric cards, episode list, the trace waterfall and the
+     live terminal console. Capture it and save as docs/assets/dashboard.png. -->
+
+## Real-World Log Test (multiline stack traces)
+
+Real errors span lines — Java/Python stack traces would be shredded by naive
+line-by-line reading. moray-aio folds continuation lines (leading whitespace or
+`at com.x.y(...)` frames) back into the previous record, so one ERROR stays one
+record through watching, clustering and analysis:
+
+```text
+# raw log (6 lines)
+2026-10-24 14:20:01 ERROR worker crashed id=a1b2c3d4e5
+    at com.moray.worker.JobRunner.run(JobRunner.java:88)
+    at java.base/java.lang.Thread.run(Thread.java:829)
+2026-10-24 14:20:02 ERROR worker crashed id=b2c3d4e5f6
+    at com.moray.worker.JobRunner.run(JobRunner.java:88)
+    at java.base/java.lang.Thread.run(Thread.java:829)
+
+# after group_multiline + clustering -> ONE template, count=2
+<TS> ERROR worker crashed id=<HEX>
+```
+
+The watcher even carries a trailing stack across poll boundaries (frames arriving
+in the next chunk merge into the same record), and clustering normalizes the whole
+record through a single precompiled regex pass — 1.44M lines fold into 4 templates
+in ~68s (see [docs/benchmark.md](docs/benchmark.md)).
 
 ## 核心能力（本阶段 MVP）
 
@@ -36,17 +111,32 @@ E:\moray-aio\
 │   ├── main.py             # FastAPI 入口
 │   ├── api\routes.py       # HTTP 接口
 │   ├── kernel\             # 自我迭代内核
-│   │   ├── state.py        # Phase 枚举 + Episode + 合法转移表
-│   │   ├── memory.py       # SQLite 长效记忆（参数绑定）
+│   │   ├── state.py        # Phase 枚举 + Episode（含 trace）+ 合法转移表
+│   │   ├── repository.py   # EpisodeRepository 抽象接口 + 共享纯函数
+│   │   ├── sqlite_repository.py  # SQLite 实现（默认单机模式，参数绑定+锁）
+│   │   ├── postgres_repository.py # Postgres 实现（MORAY_AIO_DB_DSN 启用）
 │   │   ├── approval.py     # 审批闸门（classify/decide）
 │   │   ├── planner.py      # 自驱任务生成（LLM 优先 / 启发式兜底）
-│   │   └── loop.py         # 主循环 Observe→Analyze→Propose→(审批)→Execute
-│   ├── tools\              # 只读工具集
-│   │   ├── log_reader.py   # tail/recent_errors/grep/check_readable（"rb" 只读）
-│   │   └── registry.py     # ToolRegistry：白名单校验 + 分发
+│   │   ├── loop.py         # 主循环 Observe→Analyze→Propose→(审批)→Execute
+│   │   ├── watcher.py      # 日志监听器（os.stat 轮询，只读 rb，旋转容错）
+│   │   ├── trigger_rules.py# 触发规则引擎（burst/keyword/spike + 冷却）
+│   │   └── watch_service.py# Watch 主循环（监听→触发→分析→告警）
+│   ├── notifier.py         # 告警推送：Console/Webhook/File（隔离扇出）
+│   ├── tools\              # 只读工具集（全部插件化）
+│   │   ├── plugin_base.py  # BaseTool 插件基类（name/description/risk_level/params_schema/invoke）
+│   │   ├── builtin\        # 内置工具：log_tools.py（4 个日志工具）+ probe_tools.py（4 个探针）
+│   │   ├── log_reader.py   # tail/recent_errors/grep/read_rolling/check_readable（"rb" 只读）
+│   │   ├── clusterer.py    # 错误聚类：normalize + cluster（模板折叠省 token）
+│   │   ├── probes.py       # 只读系统探针实现（port/process/disk/service）
+│   │   └── registry.py     # ToolRegistry：白名单校验 + 插件注册/目录动态加载
 │   └── llm\
 │       ├── prompts.py      # ANALYZE_*/PLAN_*（只读、白名单、严格 JSON）
-│       └── ollama_client.py# /api/generate，format=json，不可用自动兜底
+│       └── ollama_client.py# /api/generate，token 用量统计，不可用自动兜底
+├── examples\
+│   └── dummy_echo_plugin.py  # 示例插件（MORAY_AIO_PLUGIN_DIRS=examples 即可加载）
+├── cli.py                  # 命令行入口：serve / run / health（纯 ANSI）
+├── Dockerfile              # python:3.10-slim，非 root，最小镜像
+├── docker-compose.yml      # 一键启动（日志只读挂载）
 ├── scripts\backup.ps1      # 把目标文件复制到 .backup\<时间戳>-<文件名>，不改原文件
 └── tests\                  # pytest
 ```
@@ -62,11 +152,16 @@ pip install -r requirements-dev.txt
 # 跑测试
 pytest -q
 
+# 命令行直接体验（无需起服务）
+python cli.py run --trigger recent_errors --auto-approve
+python cli.py health
+
 # 拉取本地模型（Ollama 不可用时服务自动走启发式兜底，不阻塞启动）
 ollama pull qwen2.5:7b
 
 # 起服务
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8020
+# 或 python cli.py serve
 ```
 
 配置全部可用环境变量覆盖（见 `.env.example`）。默认目标日志是
@@ -84,19 +179,29 @@ $env:MORAY_AIO_LOG_PATH       = "C:\temp\demo-logs\moray.err.log"
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/health` | 健康检查；`log` 字段为目标日志的只读探测（exists/readable/size_bytes） |
+| GET | `/health` | 健康检查；`log` 字段为目标日志的只读探测（exists/readable/size_bytes），`ollama` 为模型可用性 |
+| GET | `/metrics` | 全局统计：episode 数/成功率/Token 消耗/平均耗时/任务分布 |
+| POST | `/watch/start` | 启动日志监听（幂等；日志路径须在白名单内） |
+| POST | `/watch/stop` | 停止日志监听 |
+| GET | `/watch/status` | 监听状态：running/规则命中统计/最近触发/待完成 episode |
 | GET | `/logs/recent-errors?limit=10` | 最近 N 条 ERROR（时间正序）；文件不存在 404，白名单外 403 |
-| POST | `/episodes?trigger=recent_errors` | 启动一次自我迭代，返回 episode（含 phase/tasks） |
+| POST | `/episodes?trigger=recent_errors` | **异步**启动迭代：202 + `{episode_id, phase:"created"}`，后台执行，轮询下一条接口 |
+| POST | `/episodes/sync` | 同步启动（调试用）：阻塞到终态/审批点，返回完整 episode |
 | GET | `/episodes?limit=20` | 最近的 episode 列表 |
-| GET | `/episodes/{id}` | 单个 episode 详情 |
+| GET | `/episodes/{id}` | 单个 episode 详情（异步轮询用） |
 | POST | `/episodes/{id}/tasks/{task_id}/approve` | 批准待审批任务；非只读工具 403 |
 | POST | `/episodes/{id}/tasks/{task_id}/reject` | 否决待审批任务 |
 | POST | `/episodes/{id}/tasks/approve-all` | 批量批准：仅 proposed 且只读白名单内的任务 |
 | POST | `/episodes/{id}/tasks/reject-all` | 批量拒绝：所有 proposed 任务 |
 | POST | `/episodes/{id}/resume` | 恢复迭代：无待审批任务时执行 approved 任务并继续循环 |
 | GET | `/memory/reflections?limit=5` | 最近反思/教训记录（长效记忆，只读） |
+| GET | `/memory/similar?keywords=a,b,c` | 按关键词检索历史相似 episode（Jaccard，只读调试） |
 
 交互文档：服务启动后访问 `/docs`（Swagger UI）。
+
+**API 鉴权**：设置 `MORAY_AIO_API_KEY` 后，除 `GET /health` 外所有请求必须携带
+`X-API-Key` 头（401 否则）；留空则鉴权关闭（本地调试）。客户端侧
+`scripts/moray_client.py` / `scripts/demo.py` / `cli.py` 会自动从环境变量带上该头。
 
 ## 一键演示
 
@@ -108,20 +213,203 @@ python scripts/demo.py
 # 或 set MORAY_AIO_DEMO_URL=http://127.0.0.1:8020
 ```
 
-脚本（仅标准库 urllib）会自动：POST /episodes → 打印 phase 与待审批任务 →
-approve-all（服务端只批只读白名单内的任务）→ resume → 循环直到
-`concluded/failed`，最后打印结论与长效记忆（反思记录），方便一键观看
-Agent 自驱分析的全过程。
+脚本（仅标准库 urllib）走**异步模式**：POST /episodes 拿到 202 + episode_id →
+每 2 秒轮询 GET /episodes/{id}（最多 60 次）→ phase 变成 awaiting_approval 时
+自动 approve-all（服务端只批只读白名单内的任务）+ resume → 直到 concluded/failed，
+最后打印结论与长效记忆（反思记录），一键观看 Agent 自驱分析全过程。
+
+**探针演示**（`set MORAY_AIO_DEMO_MODE=probe`）：观察 Agent 是否对
+「Connection refused 127.0.0.1:6379」自动派发 port_check / process_list 探针并打印结果。
+probe 模式需要当前工作目录存在 `moray-demo-fixture.log`（含模拟错误日志）；
+出于安全策略脚本不写文件，缺失时会打印内容与创建指引。
 
 想在本地临时日志上体验（不动 D:\MoRay）：
 
 ```powershell
 $env:MORAY_AIO_READONLY_ROOTS        = "C:\temp\demo-logs"
-$env:MORAY_AIO_LOG_PATH              = "C:\temp\demo-logs\moray.err.log"
+$env:MORAY_AIO_LOG_DIR               = "C:\temp\demo-logs"          # 滚动聚合模式
+$env:MORAY_AIO_LOG_GLOB_PATTERN      = "moray.err.log*"
 $env:MORAY_AIO_AUTO_APPROVE_READONLY = "false"   # 让 demo 展示审批环节
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8020
 python scripts\demo.py
 ```
+
+## v0.3.0：为接入 MoRay 做的三步升级
+
+**1. 异步 episode 执行**。`POST /episodes` 立即返回 `202 {"episode_id", "phase": "created"}`，
+内核丢进线程池后台执行（`MORAY_AIO_ASYNC_WORKERS` 控制并发），HTTP 不再被 LLM 阻塞；
+主项目用 `GET /episodes/{id}` 轮询状态即可。`POST /episodes/sync` 保留同步行为供调试。
+状态机新增 `queued`（created → queued → observing，与同步路径 created → observing 兼容）。
+SQLite 长效记忆加了连接级锁，HTTP 线程与后台线程并发安全。
+
+**2. 日志滚动聚合**。真实日志会滚动（`moray.err.log` / `.1` / 带日期后缀），单文件读取会漏数据。
+配置 `MORAY_AIO_LOG_DIR` + `MORAY_AIO_LOG_GLOB_PATTERN`（默认 `moray.err.log*`）后，
+`_observe` 按 mtime 新→旧聚合最多 5 个文件、合并为时间正序；未配置则回退单文件模式。
+工具层新增 `log_rolling_tail`（dir/pattern/n/max_files），同样受只读白名单与审批闸门约束。
+
+**3. 错误聚类**。`app/tools/clusterer.py` 把时间戳/IP/端口/UUID/十六进制串/数字归一化为
+`<TS>/<IP>/<PORT>/<UUID>/<HEX>/<NUM>` 占位符，同类错误折叠为一类（模板+次数+样本），
+只把 top N 类喂给 LLM——同类错误重复 1000 行不再浪费 token。聚类数上限
+`MORAY_AIO_CLUSTER_TOP_N`（默认 10）。
+
+## v0.4.0：只读系统探针 + 历史经验复用
+
+**1. 只读系统探针**（`app/tools/probes.py`，4 个工具全部只读、绝不修改系统状态）：
+- `port_check(host, port)`：TCP 端口可连性 + 延迟；host 必须命中探针白名单（默认仅环回），
+  超时/失败返回 `open=false` 不抛异常；
+- `process_list(name_pattern)`：进程列表（pid/name/内存等，上限 50 条）；
+  只读枚举，绝不 terminate/发信号；
+- `disk_usage(path)`：磁盘占用；path 受只读白名单约束；
+- `windows_service_status(service_name)`：服务状态查询（只读，绝不启停）；
+  service_name 必须匹配 `^[A-Za-z0-9_\-\s]{1,64}$`（防命令注入），subprocess 一律
+  list 形式 + shell=False，raw_output 截断 4KB；psutil 不可用时优雅降级。
+
+**2. planner 智能选工具**：错误含 `Connection refused 127.0.0.1:PORT` 时自动派
+port_check + process_list（端口→服务名推测表：6379→redis、5432→postgres 等）；
+含 disk/No space/quota 派 disk_usage；含 service/daemon 派 windows_service_status。
+非本机地址、非法 service_name、非法正则的候选一律丢弃（fail-closed）。
+
+**3. 历史相似 episode 检索**：memory 新增 episodes_index（关键词+结论），保存 episode 时
+自动提取关键词；`find_similar` 用 Jaccard 相似度找 top-k 历史案例（不依赖 embedding），
+分析时作为「历史类似案例」注入 LLM 上下文；调试可查 `GET /memory/similar`。
+
+探针执行结果以 `kind=probe` 记入 observations（进程列表注入 LLM 前会摘要为
+count + 前 3 个名字，防止撑爆上下文）。
+
+## Docker 一键启动
+
+```powershell
+docker compose up --build
+# 服务: http://127.0.0.1:8020 ；日志目录 ./logs 只读挂载到容器 /logs
+```
+
+镜像基于 python:3.10-slim、非 root 用户运行；compose 只把端口绑到本机回环。
+
+## v0.5.0：可观测性 + 插件化 + CLI + 容器化
+
+**1. Trace & Metrics**。Episode 新增 `trace` 字段：observe/analyze/propose/execute 四个
+核心阶段逐一打点（阶段、迭代号、耗时 duration_ms、时间戳、LLM token 用量）。
+Ollama 返回的 `prompt_eval_count`/`eval_count` 会被统计进对应阶段（线程隔离，避免并发串扰）。
+`GET /episodes/{id}` 返回完整 trace；`GET /metrics` 给出全局统计（episode 数、成功率、
+总 token、平均耗时、任务状态分布）。
+
+**2. 插件化工具架构**。`app/tools/plugin_base.py` 定义 `BaseTool`（name/description/
+risk_level/params_schema + `invoke(params)` 单字典入口）；8 个内置工具全部重构为
+`app/tools/builtin/` 下的 BaseTool 实现；`ToolRegistry.register_tool()` 支持动态注册，
+`MORAY_AIO_PLUGIN_DIRS`（分号分隔目录）启动时自动扫描加载 `*.py` 中的 BaseTool 子类，
+坏插件只记录到 `plugin_errors`、绝不拖垮进程。示例见 `examples/dummy_echo_plugin.py`。
+
+**3. CLI**。`python cli.py serve|run|health`：run 不经 HTTP 直接跑完整分析并在终端
+彩色输出 trace/任务/结论（纯 ANSI，NO_COLOR=1 可关）；health 检查服务状态。
+
+**4. Docker**。Dockerfile（python:3.10-slim、非 root、依赖层缓存）+ docker-compose.yml
+（日志目录只读挂载、端口只绑 127.0.0.1）。
+
+## v0.6.0：生产级基础设施
+
+**1. Repository 持久化抽象**。`app/kernel/repository.py` 定义 `EpisodeRepository` 接口
+（save/load/list_recent/metrics/record_reflection/find_similar...）；原 memory.py 迁移为
+`sqlite_repository.py`（默认单机模式），新增 `postgres_repository.py`（配置
+`MORAY_AIO_DB_DSN` 启用，依赖 `requirements-optional.txt`）。关键词提取/相似度/指标聚合
+下沉为共享纯函数，两实现复用；所有 SQL 参数绑定。
+
+**2. Token 预算熔断**。`MORAY_AIO_MAX_TOKENS_PER_EPISODE`（默认 50000）限制单 episode
+LLM 用量；analyze/propose 每次调用后累计，超限立即 `FAILED`（error=
+`Token budget exceeded: {used} / {max}`），trace 记录 `circuit_break` 事件，同步/异步同受保护。
+
+**3. API Key 鉴权**。`MORAY_AIO_API_KEY` 非空时中间件拦截所有请求（`GET /health` 除外），
+`X-API-Key` 不匹配返回 401（常量时间比较）；密钥只从环境变量读取。
+
+**4. 网络重试**。Ollama 调用带指数退避（1s/2s/4s，最多 3 次）：网络超时/连接错误/5xx 重试，
+4xx 不重试直接抛出；重试次数进 trace（`llm.retries`）与日志。
+
+## v0.7.0：事件驱动的主动运维
+
+**1. 日志监听器**（`app/kernel/watcher.py`）：`os.stat` 轮询（跨平台，Windows 无 inotify），
+只读 `'rb'` 打开；logrotate 截断自动归零、文件删除重建自动重探；异常只记日志不崩线程。
+
+**2. 触发规则引擎**（`app/kernel/trigger_rules.py`）：Rule（pattern/threshold/window/cooldown）
++ 三条默认规则——`rapid_error_burst`（60s 内 ≥5 条 ERROR）、`critical_keywords`
+（OOM/Connection refused/Segmentation fault/panic 单次即触发）、`error_spike`（60s 突增 3 倍）；
+冷却期内重复命中不触发。`MORAY_AIO_WATCH_RULES_CONFIG` 可用 JSON 覆盖。
+
+**3. 告警推送**（`app/notifier.py`）：Console / Webhook（钉钉/飞书/Slack 通用 + 自定义模板，
+URL 强校验：http/https + 域名白名单 + 拒环回/私有/保留地址 + 防 DNS rebinding + 禁重定向）/
+File（只写自己的 `data/alerts.log`）；多 Notifier 隔离扇出，单点失败不影响其他。
+
+**4. Watch 模式**（`app/kernel/watch_service.py`）：监听 → 规则触发 → `start_async` 自驱分析 →
+episode 终态推送结论（concluded）或错误（failed）。`MORAY_AIO_WATCH_ENABLED=true` 时
+服务启动即监听（默认关闭）；`POST /watch/start|stop`、`GET /watch/status` 手动控制；
+`python cli.py watch --log-path <path>` 直接在终端跑（Ctrl+C 优雅退出）。
+
+## 架构（Event-driven）
+
+```mermaid
+flowchart TD
+    W[EventWatcher<br/>os.stat 轮询日志] --> T[TriggerEngine<br/>burst / keyword / spike + 冷却]
+    T -->|watch:rule| L[EvolutionLoop<br/>Observe → Analyze → Propose → Execute]
+    L --> P[只读工具/探针<br/>log_reader / probes / plugins]
+    L --> LLM[Ollama LLM<br/>Token 熔断 + 重试退避]
+    L -->|concluded / failed| N[Notifier<br/>Console / Webhook / File]
+    L --> R[(Repository<br/>SQLite / Postgres)]
+    D[Dashboard<br/>/dashboard] --> L
+    D --> T
+```
+
+**Episode 生命周期**：`created → queued → observing → analyzing → proposing →
+(awaiting_approval ⇄) executing → analyzing → … → concluded`，异常/熔断进入 `failed`。
+任务状态：`proposed → approved/rejected → done/failed/empty`（empty 会反馈给下一轮规划纠错）。
+
+## 可视化控制台（Dashboard + Live SSE）
+
+`GET /dashboard` 打开单页控制台（Alpine.js + Tailwind CDN，零构建依赖）：
+暗色高密度布局，顶部指标卡（episodes / success rate / tokens / watch 呼吸灯），
+左侧 Episode 列表，右侧 **Trace 瀑布图**（observe/analyze/propose/execute 耗时横条、
+token 标注 `1115 prompt / 393 completion`、`circuit_break` 红色高亮）。
+
+**实时流**：`GET /api/stream`（SSE）推送 `hello` / `log_captured` / `rule_fired` /
+`episode_phase` / `alert` 事件；前端用 `EventSource` 驱动底部 **Live Terminal 面板**
+（实时滚动打印捕获的日志与状态流转）、Episode 列表平滑插入动画和指标卡数字跳动。
+数据快照来自 `GET /api/dashboard/data`；配置 API Key 时用
+`http://127.0.0.1:8020/dashboard?api_key=...` 访问（前端自动带 header）。
+
+## Safety by Design
+
+1. **只读日志**：日志只以 `open(path, "rb")` 打开；绝不写、截断、重命名、删除被监控文件。
+2. **路径白名单**：工具输入经 `Path.resolve() + relative_to` 校验，越界抛 `PermissionError`（含 `..` 穿越）。
+3. **绝不执行危险命令**：kill/reboot/restart/shutdown/rm/del/format 只能作为「建议：…」文本出现。
+4. **审批闸门**：非只读工具直接拒绝；高危 token 永远 `pending` 等人工。
+5. **Token 预算熔断**：单 episode LLM 用量超限立即 `FAILED` + `circuit_break` trace。
+6. **出站请求纪律**：URL 仅 http/https + host 白名单；Webhook 拒环回/私有/保留地址、防 DNS rebinding、禁重定向。
+7. **凭据纪律**：密钥只从环境变量读取；源码/示例/测试零凭据字面量。
+8. **SQL 全参数绑定**；探针只读（psutil 枚举/sc query），subprocess 一律 list + shell=False。
+
+## 性能（100MB 日志实测）
+
+| 项目 | 指标 |
+| --- | --- |
+| read_rolling 全量扫描 | 144.5 万行 / 16.6s / 6.1 MB/s |
+| cluster 聚类 | 144.5 万行 → 4 类 / 21,259 lines/s |
+| 并发启发式分析 | 20 workers → **269.6 QPS**（无 LLM 内核全链路） |
+
+完整报告见 [docs/benchmark.md](docs/benchmark.md)（`python scripts/benchmark.py` 可复现）。
+
+## 插件：自定义只读探针
+
+`examples/` 提供两个插件示例：`dummy_echo_plugin.py`（最小回显）与
+`k8s_pod_check_plugin.py`（K8s Pod 检查 Mock，演示「系统探针类」插件写法——
+真实实现建议只读 `kubectl get pods` / K8s API GET）。设置
+`MORAY_AIO_PLUGIN_DIRS=examples` 即可加载，工具自动出现在 planner/LLM 可选清单。
+
+## 版本
+
+- **v0.2.0**（tag）：MVP——Ollama 接入、自我迭代内核、批量审批、demo CLI。
+- **v0.3.0**（tag）：异步 episodes、日志滚动聚合、错误聚类，面向 MoRay 主项目 HTTP 接入就绪。
+- **v0.4.0**（tag）：只读系统探针、planner 智能派发、历史相似案例检索。
+- **v0.5.0**（tag）：trace/metrics 可观测性、BaseTool 插件化、CLI、Docker。
+- **v0.6.0**（tag）：Repository 抽象（SQLite/Postgres）、Token 熔断、API 鉴权、网络重试。
+- **v0.7.0**（tag）：事件驱动 Watch——日志监听、触发规则、Webhook 告警、自驱分析闭环。
+- **v1.0.0**（tag）：正式版——可视化控制台、压测报告、CI/LICENSE/CONTRIBUTING 开源基建、Docker 闭环。
 
 ## Episode 生命周期
 

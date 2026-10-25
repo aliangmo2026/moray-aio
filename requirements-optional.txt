@@ -1,0 +1,3 @@
+# 可选依赖：Postgres 仓储（仅当 MORAY_AIO_DB_DSN 配置时需要）
+# 默认 SQLite 模式无需安装本文件中的任何依赖。
+psycopg2-binary>=2.9

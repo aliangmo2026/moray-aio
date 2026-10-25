@@ -1,8 +1,8 @@
-"""API 层测试：批量审批/拒绝接口、/health 的 ollama 字段、反思记忆查询。
+"""API layer tests: batch approval/reject endpoints, the /health ollama field,
+and the reflections memory endpoint.
 
-不发起任何真实网络请求：通过 monkeypatch 把 routes.get_loop / get_llm
-替换为基于 tmp_path 的真实 EvolutionLoop（llm=None）与离线 LLM 桩。
-"""
+No real network calls happen: routes.get_loop / get_llm are monkeypatched to a real
+EvolutionLoop built on tmp_path (llm=None) plus an offline LLM stub."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.kernel.loop import EvolutionLoop
-from app.kernel.memory import Memory
+from app.kernel.sqlite_repository import Memory
 from app.tools.registry import ToolRegistry
 
 RICH_LOG = "\n".join(
@@ -27,7 +27,7 @@ RICH_LOG = "\n".join(
 
 
 class _OfflineLLM:
-    """永远不可用的 LLM 桩：/health 的 ollama.available 恒为 False。"""
+    """Stub LLM that is never available: /health ollama.available stays False."""
 
     def is_available(self):
         return False
@@ -59,9 +59,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(routes, "get_loop", lambda: loop)
     monkeypatch.setattr(routes, "get_llm", lambda: _OfflineLLM())
 
-    from app.main import app
+    from app.main import create_app
 
-    return TestClient(app), loop
+    return TestClient(create_app(settings)), loop
 
 
 def test_health_includes_ollama_field(env):
@@ -71,16 +71,19 @@ def test_health_includes_ollama_field(env):
     body = resp.json()
     assert body["status"] == "ok"
     assert body["ollama"] == {"available": False, "model": Settings().ollama_model}
-    # /health 依旧探测真实默认日志路径（tmp_path 不影响全局 settings）
-    assert body["log"]["exists"] is False
+    # /health reports the real default log path metadata (environment-agnostic shape)
+    assert set(body["log"]) == {"path", "exists", "readable", "size_bytes"}
+    assert body["log"]["path"] == Settings().log_path
 
 
 def test_approve_all_then_resume_concludes(env):
     client, _loop = env
-    ep = client.post("/episodes").json()
+    ep = client.post("/episodes/sync").json()
     assert ep["phase"] == "awaiting_approval"
     proposed = [t for t in ep["tasks"] if t["status"] == "proposed"]
-    assert len(proposed) == 3  # 连接被拒/超时/文件缺失 → 启发式各提一条
+    # connection refused / timeout / missing file -> 3 log_grep + port_check + process_list
+    assert len(proposed) == 5
+    assert {t["tool"] for t in proposed} == {"log_grep", "port_check", "process_list"}
 
     resp = client.post("/episodes/{}/tasks/approve-all".format(ep["id"]))
     assert resp.status_code == 200
@@ -94,7 +97,7 @@ def test_approve_all_then_resume_concludes(env):
 
 def test_reject_all_leads_to_conclusion_without_done(env):
     client, _loop = env
-    ep = client.post("/episodes").json()
+    ep = client.post("/episodes/sync").json()
     resp = client.post("/episodes/{}/tasks/reject-all".format(ep["id"]))
     assert resp.status_code == 200
     after = resp.json()
@@ -107,8 +110,8 @@ def test_reject_all_leads_to_conclusion_without_done(env):
 
 def test_approve_all_skips_nonreadonly_proposed(env):
     client, loop = env
-    ep = client.post("/episodes").json()
-    # 混入一个非只读工具的 proposed 任务，验证批量审批不会批准它
+    ep = client.post("/episodes/sync").json()
+    # mix in a proposed non-read-only task; batch approval must skip it
     loop.require(ep["id"]).tasks.append(
         {
             "id": "evil000001",
@@ -138,7 +141,7 @@ def test_approve_all_and_reject_all_unknown_episode_404(env):
 
 def test_memory_reflections_endpoint(env):
     client, _loop = env
-    ep = client.post("/episodes").json()
+    ep = client.post("/episodes/sync").json()
     client.post("/episodes/{}/tasks/reject-all".format(ep["id"]))
     client.post("/episodes/{}/resume".format(ep["id"]))
 

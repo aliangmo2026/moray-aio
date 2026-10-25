@@ -1,4 +1,4 @@
-"""自我迭代内核的状态机：Phase 枚举、Episode 数据结构与合法转移表。"""
+"""Self-evolution kernel state machine: Phase enum, Episode dataclass and legal transitions."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ import uuid
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Set, Union
+
+from app.kernel.events import publish as publish_event
 
 
 def _now() -> str:
@@ -15,6 +17,7 @@ def _now() -> str:
 
 class Phase(str, Enum):
     CREATED = "created"
+    QUEUED = "queued"
     OBSERVING = "observing"
     ANALYZING = "analyzing"
     PROPOSING = "proposing"
@@ -24,9 +27,11 @@ class Phase(str, Enum):
     FAILED = "failed"
 
 
-# 显式合法转移表；表外转移一律非法（transition() 抛 ValueError）
+# Explicit transition table; anything outside it raises ValueError in transition().
+# created -> observing (sync path) and created -> queued -> observing (async path) are both legal.
 ALLOWED: Dict[Phase, Set[Phase]] = {
-    Phase.CREATED: {Phase.OBSERVING, Phase.FAILED},
+    Phase.CREATED: {Phase.OBSERVING, Phase.QUEUED, Phase.FAILED},
+    Phase.QUEUED: {Phase.OBSERVING, Phase.FAILED},
     Phase.OBSERVING: {Phase.ANALYZING, Phase.FAILED},
     Phase.ANALYZING: {Phase.PROPOSING, Phase.CONCLUDED, Phase.FAILED},
     Phase.PROPOSING: {
@@ -44,7 +49,7 @@ ALLOWED: Dict[Phase, Set[Phase]] = {
 
 @dataclass
 class Episode:
-    """一次自我迭代的完整轨迹：观察、分析、任务、结论。"""
+    """Full trajectory of one self-evolution run: observations, analysis, tasks, conclusion."""
 
     id: str
     trigger: str
@@ -55,6 +60,9 @@ class Episode:
     tasks: List[dict] = field(default_factory=list)
     conclusion: Optional[str] = None
     error: Optional[str] = None
+    # Low-level tracing: one entry per core stage
+    # {stage, iteration, phase, timestamp, duration_ms, llm}
+    trace: List[dict] = field(default_factory=list)
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
 
@@ -63,6 +71,8 @@ class Episode:
         return cls(id=str(uuid.uuid4()), trigger=trigger, phase=Phase.CREATED)
 
     def transition(self, target: Union[Phase, str]) -> Phase:
+        """Move to the target phase; raises ValueError on any illegal transition.
+        Every transition is published to the event bus (SSE live stream)."""
         if isinstance(target, str):
             target = Phase(target)
         if target not in ALLOWED.get(self.phase, set()):
@@ -71,9 +81,18 @@ class Episode:
             )
         self.phase = target
         self.updated_at = _now()
+        publish_event(
+            "episode_phase",
+            {
+                "episode_id": self.id,
+                "trigger": self.trigger,
+                "phase": self.phase.value,
+                "iteration": self.iteration,
+            },
+        )
         return self.phase
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
             "trigger": self.trigger,
@@ -84,12 +103,14 @@ class Episode:
             "tasks": self.tasks,
             "conclusion": self.conclusion,
             "error": self.error,
+            "trace": self.trace,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Episode":
+    def from_dict(cls, data: Optional[dict]) -> "Episode":
+        """Rebuild from a persisted payload; unknown keys are dropped (forward compatible)."""
         data = dict(data or {})
         data["phase"] = Phase(data.get("phase", Phase.CREATED.value))
         known = {f.name for f in fields(cls)}

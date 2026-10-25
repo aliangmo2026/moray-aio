@@ -1,10 +1,11 @@
-"""只读日志读取工具。
+"""Read-only log reader.
 
-硬约束：
-- 只以 ``open(path, "rb")`` 打开日志文件，绝不写入/截断/重命名/删除。
-- 从文件尾部按字节窗口扫描（默认最多 5MB），不把整份大日志读进内存。
-- 窗口起点若落在行中间，丢弃首个不完整行。
-- 解码使用 errors="replace"，坏字节不会让程序崩溃。
+Hard rules:
+- Log files are only opened with ``open(path, "rb")`` — never written, truncated,
+  renamed or deleted;
+- Scans a byte window from the tail (5MB by default) instead of loading whole files;
+- When the window starts mid-line, the first incomplete line is dropped;
+- Decoding uses errors="replace" so bad bytes never crash the process.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 PathLike = Union[str, "os.PathLike"]
 
@@ -21,12 +22,12 @@ DEFAULT_MAX_SCAN_BYTES = 5 * 1024 * 1024
 
 
 class LogReadError(Exception):
-    """日志文件不存在或不是普通文件时抛出。"""
+    """Raised when the log file does not exist or is not a regular file."""
 
 
 @dataclass(frozen=True)
 class LogLine:
-    """一行日志：文本 + 该行起始字节在文件中的偏移。"""
+    """One log line: text plus the byte offset of the line start inside the file."""
 
     text: str
     offset: int
@@ -44,11 +45,12 @@ def _require_readable_file(log_path: PathLike) -> Tuple[Path, int]:
     return path, path.stat().st_size
 
 
-def _scan_window(fh, max_scan_bytes: int):
-    """读取尾部字节窗口，返回 [(行起始偏移, 解码文本), ...]（时间正序）。
+def _scan_window(fh, max_scan_bytes: int) -> List[Tuple[int, str]]:
+    """Read the tail byte window and decode it line by line (time ascending).
 
-    窗口起点落在行中间时丢弃首个不完整行；整个窗口内找不到换行时
-    （单行超过扫描窗口）放弃本次扫描，绝不基于截断片段下结论。
+    When the window starts mid-line the first incomplete line is dropped; when the
+    window contains no newline at all (a single line bigger than the window) the
+    scan is abandoned — conclusions are never drawn from truncated fragments.
     """
     fh.seek(0, os.SEEK_END)
     size = fh.tell()
@@ -66,26 +68,29 @@ def _scan_window(fh, max_scan_bytes: int):
         first_offset = scan_start + newline_at + 1
         data = data[newline_at + 1:]
 
-    out = []
+    out: List[Tuple[int, str]] = []
     pos = first_offset
     for raw in data.split(b"\n"):
         line_start = pos
         pos += len(raw) + 1
-        # 文件以换行结尾时 split 会产生一个空尾巴，其起点恰为文件末尾，丢弃
+        # a trailing split artifact (file ends with \n) starts exactly at EOF: drop
         if raw == b"" and line_start == size:
             continue
-        text = raw.decode("utf-8", errors="replace").rstrip("\r")
+        # strip the UTF-8 BOM sometimes found in Windows-produced files
+        text = raw.decode("utf-8", errors="replace").rstrip("\r").lstrip("\ufeff")
         out.append((line_start, text))
     return out
 
 
-def _tail_pairs(log_path: PathLike, n: int, keyword: Optional[str], max_scan_bytes: int):
-    pairs = []
+def _tail_pairs(
+    log_path: PathLike, n: int, keyword: Optional[str], max_scan_bytes: int
+) -> List[Tuple[int, str]]:
+    pairs: List[Tuple[int, str]] = []
     n = max(0, int(n))
     if n == 0:
         return pairs
     path, _size = _require_readable_file(log_path)
-    with open(path, "rb") as fh:  # 只读二进制模式，绝不写入
+    with open(path, "rb") as fh:  # read-only binary mode, never write
         for offset, text in _scan_window(fh, max_scan_bytes):
             if keyword is None or keyword in text:
                 pairs.append((offset, text))
@@ -97,8 +102,8 @@ def tail(
     n: int,
     keyword: Optional[str] = None,
     max_scan_bytes: int = DEFAULT_MAX_SCAN_BYTES,
-) -> list:
-    """文件尾部 n 行（时间正序）；keyword 给定时只保留包含该关键词的行。"""
+) -> List[str]:
+    """Last n lines of the file (time ascending); keyword filters when given."""
     return [text for _offset, text in _tail_pairs(log_path, n, keyword, max_scan_bytes)]
 
 
@@ -107,8 +112,8 @@ def recent_errors(
     limit: int = 10,
     max_scan_bytes: int = DEFAULT_MAX_SCAN_BYTES,
     keyword: str = "ERROR",
-) -> list:
-    """尾部扫描窗口内最近 limit 条含 keyword 的日志行（默认 "ERROR"，时间正序）。"""
+) -> List[LogLine]:
+    """Latest ``limit`` lines containing ``keyword`` (default "ERROR"), time ascending."""
     return [
         LogLine(text=text, offset=offset)
         for offset, text in _tail_pairs(log_path, limit, keyword, max_scan_bytes)
@@ -120,14 +125,14 @@ def grep(
     pattern: str,
     limit: int = 100,
     max_scan_bytes: int = DEFAULT_MAX_SCAN_BYTES,
-) -> list:
-    """尾部窗口内的正则匹配行（时间正序，取最后 limit 条）。"""
+) -> List[str]:
+    """Regex matches inside the tail window (time ascending, last ``limit`` kept)."""
     limit = max(0, int(limit))
     if limit == 0:
         return []
     regex = re.compile(pattern)
     path, _size = _require_readable_file(log_path)
-    hits = []
+    hits: List[str] = []
     with open(path, "rb") as fh:
         for _offset, text in _scan_window(fh, max_scan_bytes):
             if regex.search(text):
@@ -135,12 +140,60 @@ def grep(
     return hits[-limit:]
 
 
+def read_rolling(
+    log_dir: PathLike,
+    pattern: str,
+    n: int,
+    max_files: int = 5,
+    max_scan_bytes: int = DEFAULT_MAX_SCAN_BYTES,
+    keyword: Optional[str] = None,
+) -> List[str]:
+    """Aggregated read across rotated logs: glob-matched files ordered by mtime
+    (newest first), tails merged into one time-ascending list.
+
+    - ``pattern`` like "moray.err.log*" matches regular files only;
+    - at most ``max_files`` files are read; stops after ``n`` lines;
+    - optional ``keyword`` filter (e.g. "ERROR"); empty result when nothing matches;
+    - missing/non-directory paths raise LogReadError.
+    """
+    n = max(0, int(n))
+    if n == 0:
+        return []
+    directory = Path(log_dir)
+    if not directory.exists():
+        raise LogReadError("log dir not found: {}".format(directory))
+    if not directory.is_dir():
+        raise LogReadError("not a directory: {}".format(directory))
+
+    files = [p for p in sorted(directory.glob(str(pattern))) if p.is_file()]
+    # mtime descending: newest file first
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    files = files[: max(1, int(max_files))]
+
+    batches: List[List[str]] = []  # per-file tail lines (ascending), newest file first
+    total = 0
+    for path in files:
+        remaining = n - total
+        if remaining <= 0:
+            break
+        pairs = _tail_pairs(path, remaining, keyword, max_scan_bytes)
+        if not pairs:
+            continue
+        batches.append([text for _offset, text in pairs])
+        total += len(batches[-1])
+
+    out: List[str] = []
+    for batch in reversed(batches):  # oldest file first -> time ascending
+        out.extend(batch)
+    return out
+
+
 def check_readable(log_path: PathLike) -> dict:
-    """只探测元数据（exists/readable/size_bytes），不读任何内容，绝不抛异常。"""
+    """Metadata-only probe (exists/readable/size_bytes); reads nothing, never raises."""
     path = Path(log_path)
     exists = path.exists()
     readable = False
-    size_bytes = None
+    size_bytes: Optional[int] = None
     if exists:
         try:
             size_bytes = path.stat().st_size
@@ -153,3 +206,33 @@ def check_readable(log_path: PathLike) -> dict:
         "readable": readable,
         "size_bytes": size_bytes,
     }
+
+
+# ---------------------------------------------------------------- multiline records
+
+# A continuation line starts with whitespace, or is a stack frame like "at com.x.y(...)".
+# Real ERROR entries (Java/Python stack traces) span multiple lines; these get folded
+# back into the previous record instead of being shred into pieces.
+CONTINUATION_RE = re.compile(r"^(?:[ \t]|\s*at\s)")
+
+_MAX_RECORD_BYTES = 16384
+
+
+def group_multiline(lines: List[str], max_record_bytes: int = _MAX_RECORD_BYTES) -> List[str]:
+    """Merge continuation lines (leading whitespace / "at ..." frames) into the
+    previous record, keeping multi-line stack traces whole.
+
+    Records are joined with newlines; a record that would exceed
+    ``max_record_bytes`` starts a new one instead (memory safety).
+    """
+    records: List[str] = []
+    for line in lines:
+        if (
+            records
+            and CONTINUATION_RE.match(line)
+            and len(records[-1]) + len(line) < max_record_bytes
+        ):
+            records[-1] += "\n" + line
+        else:
+            records.append(line)
+    return records

@@ -1,29 +1,76 @@
-"""自驱任务生成：优先 LLM 规划，LLM 不可用或产出为空时启发式兜底。
+"""Self-driven task generation: LLM planning first, heuristic fallback when the
+LLM is unavailable or produces nothing.
 
-安全约束（fail-closed）：
-- 只接受白名单工具（log_tail/log_grep/list_files）；
-- 参数先按工具白名单过滤（LLM 幻觉出的多余键直接丢弃）；
-- path/dir 必须通过 ToolRegistry._check_path，否则整条任务丢弃；
-- 与 existing_tasks 按 (tool, params) 去重。
+Safety constraints (fail-closed):
+- Only whitelisted tools are accepted (log_tail/log_grep/list_files/log_rolling_tail
+  plus the four read-only probes);
+- Params are filtered by a per-tool key whitelist (hallucinated extra keys from the
+  LLM are dropped);
+- path/dir must pass ToolRegistry._check_path; probe hosts must hit the host
+  whitelist; service_name must pass the safety regex; name_pattern must be a valid
+  regex — otherwise the whole candidate is dropped;
+- Dedup against existing_tasks by (tool, params).
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from app.kernel import approval
+from app.tools.probes import SERVICE_NAME_RE
 
-ALLOWED_TOOLS = ("log_tail", "log_grep", "list_files")
+ALLOWED_TOOLS = (
+    "log_tail",
+    "log_grep",
+    "list_files",
+    "log_rolling_tail",
+    "port_check",
+    "process_list",
+    "disk_usage",
+    "windows_service_status",
+)
 
-# 每个工具允许的参数键；其余键（可能包含危险指令）直接丢弃
+# Allowed parameter keys per tool; anything else (possibly dangerous instructions)
+# is dropped outright
 _TOOL_PARAM_KEYS: Dict[str, tuple] = {
     "log_tail": ("path", "n", "keyword"),
     "log_grep": ("path", "pattern", "limit"),
     "list_files": ("dir",),
+    "log_rolling_tail": ("dir", "pattern", "n", "max_files"),
+    "port_check": ("host", "port", "timeout"),
+    "process_list": ("name_pattern",),
+    "disk_usage": ("path",),
+    "windows_service_status": ("service_name",),
 }
+
+# Common service ports -> guessed process name (used as process_list name_pattern)
+SERVICE_PORT_HINTS: Dict[str, str] = {
+    "6379": "redis",
+    "5432": "postgres",
+    "3306": "mysql",
+    "27017": "mongodb",
+    "11211": "memcached",
+    "8000": "python|java|node",
+    "8080": "python|java|node",
+    "9200": "elasticsearch",
+    "5672": "rabbitmq",
+}
+
+# Known Windows service names: windows_service_status is only proposed when one of
+# these words actually appears in the error text (never invented)
+KNOWN_SERVICE_TOKENS = (
+    "redis", "mysql", "postgres", "postgresql", "mongodb", "memcached",
+    "rabbitmq", "elasticsearch", "spooler", "dnscache", "wuauserv",
+)
+
+# Only 127.0.0.1:PORT / localhost:PORT extracted from the error text are probed —
+# nothing is ever fabricated (hosts are inside the probe whitelist by construction)
+_HOST_PORT_RE = re.compile(r"\b((?:127\.0\.0\.1|localhost)):(\d{1,5})", re.IGNORECASE)
 
 
 def _now() -> str:
@@ -47,10 +94,10 @@ def propose_tasks(
     auto_approve_readonly: bool = True,
     failed_tasks: Optional[List[dict]] = None,
 ) -> List[dict]:
-    """生成下一批只读侦查任务（时间无关，纯函数式入口）。
+    """Generate the next batch of read-only investigation tasks (pure function).
 
-    failed_tasks：上一轮 failed/empty 任务及其原因，作为 LLM 的反馈上下文，
-    让下一轮规划避开已被证伪的 pattern/参数。
+    ``failed_tasks``: failed/empty tasks from previous rounds with their reasons —
+    passed to the LLM so the next round avoids disproven patterns/parameters.
     """
     candidates: List[dict] = []
     if llm is not None:
@@ -64,7 +111,7 @@ def propose_tasks(
             )
             candidates = _coerce_llm_tasks(raw)
         except Exception:
-            candidates = []  # LLM 任何抖动都回落启发式
+            candidates = []  # any LLM hiccup falls back to heuristics
     if not candidates:
         candidates = _heuristic_candidates(errors, log_path)
 
@@ -82,9 +129,12 @@ def propose_tasks(
     return accepted
 
 
-# ---- 校验与落库 ----
+# ---- validation ----
 
-def _validate_candidate(cand: dict, tools, log_path: str, auto_approve_readonly: bool):
+def _validate_candidate(
+    cand: dict, tools, log_path: str, auto_approve_readonly: bool
+) -> Optional[dict]:
+    """Validate one candidate; returns a task dict or None (fail-closed)."""
     tool = cand.get("tool")
     if tool not in _TOOL_PARAM_KEYS:
         return None
@@ -94,7 +144,7 @@ def _validate_candidate(cand: dict, tools, log_path: str, auto_approve_readonly:
     params = {k: v for k, v in raw_params.items() if k in _TOOL_PARAM_KEYS[tool]}
     rationale = str(cand.get("rationale", ""))[:500]
 
-    # path/dir 白名单校验：任何一条不过就丢弃整条任务
+    # path/dir whitelist: any failure drops the whole candidate
     for key in ("path", "dir"):
         if key in params:
             try:
@@ -102,7 +152,7 @@ def _validate_candidate(cand: dict, tools, log_path: str, auto_approve_readonly:
             except Exception:
                 return None
 
-    # tail/grep 缺省 path 时默认分析当前日志（同样要过白名单）
+    # tail/grep default to the current log when path is missing (also whitelist-checked)
     if tool in ("log_tail", "log_grep") and "path" not in params:
         try:
             tools._check_path(str(log_path))
@@ -113,7 +163,30 @@ def _validate_candidate(cand: dict, tools, log_path: str, auto_approve_readonly:
     if tool == "log_grep" and not str(params.get("pattern", "")).strip():
         return None
 
-    for key in ("n", "limit"):
+    # ---- probe pre-validation (fail-closed: drop tasks rather than allow risky params) ----
+    if tool == "port_check":
+        try:
+            tools.check_probe_host(str(params.get("host", "")))
+            port = int(params.get("port"))
+        except Exception:
+            return None
+        if not (1 <= port <= 65535):
+            return None
+        params["port"] = port
+
+    if tool == "process_list" and "name_pattern" in params:
+        try:
+            re.compile(str(params["name_pattern"]))
+        except re.error:
+            return None
+
+    if tool == "windows_service_status":
+        name = str(params.get("service_name", "")).strip()
+        if not SERVICE_NAME_RE.match(name):
+            return None
+        params["service_name"] = name
+
+    for key in ("n", "limit", "max_files", "port"):
         if key in params:
             try:
                 params[key] = int(params[key])
@@ -137,7 +210,7 @@ def _make_task(tool: str, params: dict, rationale: str, auto_approve_readonly: b
     }
 
 
-# ---- 启发式兜底 ----
+# ---- heuristic fallback ----
 
 def _heuristic_candidates(errors: List[str], log_path: str) -> List[dict]:
     blob = "\n".join(str(e) for e in (errors or []))
@@ -153,15 +226,42 @@ def _heuristic_candidates(errors: List[str], log_path: str) -> List[dict]:
                     "pattern": "Connection refused|ECONNREFUSED",
                     "limit": 50,
                 },
-                "rationale": "发现连接被拒错误，回溯同类错误的出现频率与目标地址。",
+                "rationale": "Connection refused errors found; trace frequency and targets.",
             }
         )
+        # Only probe host:port pairs actually present in the error text — never invented
+        seen_ports = set()
+        for match in _HOST_PORT_RE.finditer(blob):
+            host = match.group(1).lower()
+            port = match.group(2)
+            if port in seen_ports:
+                continue
+            seen_ports.add(port)
+            candidates.append(
+                {
+                    "tool": "port_check",
+                    "params": {"host": host, "port": int(port)},
+                    "rationale": "probes are read-only: check whether {}:{} is reachable now.".format(host, port),
+                }
+            )
+            hint = SERVICE_PORT_HINTS.get(port)
+            if hint:
+                candidates.append(
+                    {
+                        "tool": "process_list",
+                        "params": {"name_pattern": hint},
+                        "rationale": "probes are read-only: port {} usually means {}; check the process.".format(port, hint),
+                    }
+                )
+            if len(seen_ports) >= 3:
+                break  # probe at most 3 ports to avoid explosion
+
     if "timeout" in lower or "timed out" in lower:
         candidates.append(
             {
                 "tool": "log_grep",
                 "params": {"path": log_path, "pattern": "(?i)timeout|timed out", "limit": 50},
-                "rationale": "发现超时错误，回溯全部超时记录判断是否集中在同一依赖。",
+                "rationale": "Timeout errors found; trace all records to spot one bad dependency.",
             }
         )
     if "no such file" in lower or "filenotfounderror" in lower:
@@ -173,16 +273,35 @@ def _heuristic_candidates(errors: List[str], log_path: str) -> List[dict]:
                     "pattern": "No such file|FileNotFoundError",
                     "limit": 50,
                 },
-                "rationale": "发现文件缺失错误，回溯相关行确认缺失的具体路径。",
+                "rationale": "Missing-file errors found; trace the exact paths involved.",
             }
         )
+    if any(token in lower for token in ("disk", "no space", "quota")):
+        candidates.append(
+            {
+                "tool": "disk_usage",
+                "params": {"path": os.path.dirname(str(log_path)) or str(log_path)},
+                "rationale": "probes are read-only: check disk usage of the log directory.",
+            }
+        )
+    if "service" in lower or "daemon" in lower:
+        for token in KNOWN_SERVICE_TOKENS:
+            if re.search(r"\b{}\b".format(re.escape(token)), lower):
+                candidates.append(
+                    {
+                        "tool": "windows_service_status",
+                        "params": {"service_name": token},
+                        "rationale": "probes are read-only: query the Windows service state (never start/stop).",
+                    }
+                )
+                break
     return candidates
 
 
-# ---- LLM 输出收敛 ----
+# ---- LLM output coercion ----
 
 def _coerce_llm_tasks(raw) -> List[dict]:
-    """把 LLM 的 JSON 输出收敛成候选任务列表；任何不合形都返回空列表。"""
+    """Fold the LLM JSON output into candidate tasks; anything malformed -> []."""
     if not isinstance(raw, dict) or raw.get("parse_error"):
         return []
     items = raw.get("tasks")

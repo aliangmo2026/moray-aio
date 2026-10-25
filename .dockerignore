@@ -1,0 +1,14 @@
+.git
+.mimosa
+.venv
+.backup
+data
+logs
+tests
+examples
+__pycache__
+*.pyc
+.pytest_cache
+.env
+README.md
+docker-compose.yml
