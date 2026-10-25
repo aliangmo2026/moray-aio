@@ -20,6 +20,6 @@ data/
 # 编辑器
 .vscode/
 .idea/
-/.mimosa/finding-ledger/v1
-/.mimosa/reports
+# Security plugin workspace (never commit)
+/.mimosa/
 *.json
