@@ -158,6 +158,15 @@ class Settings:
         default_factory=lambda: _env_int("MORAY_AIO_RATE_LIMIT_PER_MINUTE", 5)
     )
 
+    # ---- Critic Agent dual-review (v2.0.0) ----
+    # When on, a second LLM pass (Critic Agent) audits each analysis; objections
+    # trigger one Reflexion round where the Analyst re-reasons with the criticism
+    critic_enabled: bool = field(default_factory=lambda: _env_bool("MORAY_AIO_CRITIC_ENABLED", True))
+    # How many objection -> re-analysis rounds may follow per analyze stage (0 disables reflexion)
+    critic_max_reflexion_rounds: int = field(
+        default_factory=lambda: _env_int("MORAY_AIO_CRITIC_MAX_REFLEXION_ROUNDS", 1)
+    )
+
     # ---- Dynamic AST sandbox (v2.0.0) ----
     # Master switch for the execute_safe_python tool (LLM-written read-only
     # snippets; statically vetted, empty builtins, hard timeout)

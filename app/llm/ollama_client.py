@@ -30,7 +30,14 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from app.llm.prompts import ANALYZE_SYSTEM, ANALYZE_USER, PLAN_SYSTEM, PLAN_USER
+from app.llm.prompts import (
+    ANALYZE_SYSTEM,
+    ANALYZE_USER,
+    CRITIC_SYSTEM_PROMPT,
+    CRITIC_USER,
+    PLAN_SYSTEM,
+    PLAN_USER,
+)
 
 logger = logging.getLogger("moray_aio.ollama")
 
@@ -217,17 +224,43 @@ class OllamaClient:
         lessons: Optional[list] = None,
         failed: Optional[list] = None,
         similar: Optional[list] = None,
+        critic_feedback: Optional[list] = None,
     ) -> Dict[str, Any]:
-        """Analyze clustered errors and produce summary/causes/gaps/conclusion."""
+        """Analyze clustered errors and produce summary/causes/gaps/conclusion.
+
+        ``critic_feedback`` carries the Critic Agent's objections from a previous
+        round (Reflexion); empty on the first pass.
+        """
         prompt = ANALYZE_USER.format(
             lessons=_bullets(lessons),
             errors=_bullets(errors),
             extra=_bullets(extra),
             failed=_bullets(failed),
             similar_cases=_bullets(similar),
+            critic_feedback=_bullets(critic_feedback),
             n_classes=len(list(errors or [])),
         )
         return self._generate(prompt, ANALYZE_SYSTEM)
+
+    def critic_review(self, errors: List[str], analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Critic Agent: audit an Analyst conclusion (dual-review, v2.0).
+
+        Returns {"verdict": "pass"|"revise", "objections": [...], ...}; malformed
+        model output degrades to {"parse_error": True} which the kernel treats as
+        "skip this review round" (the analysis is never blocked by a bad critic).
+        """
+        prompt = CRITIC_USER.format(
+            errors=_bullets(errors),
+            analysis=json.dumps(analysis, ensure_ascii=False, default=str),
+        )
+        return self._generate(prompt, CRITIC_SYSTEM_PROMPT)
+
+    def stash_usage(self, usage: Optional[Dict[str, Any]]) -> None:
+        """Re-park a previously taken usage record into this thread's slot so the
+        outer _timed() stage attribution still sees the FIRST call's tokens even
+        when the kernel interleaves extra LLM calls (critic/reflexion) afterwards."""
+        if usage is not None:
+            self._tls.last_usage = usage
 
     def plan_tasks(
         self,

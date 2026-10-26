@@ -22,6 +22,7 @@ from app.kernel.planner import propose_tasks
 from app.kernel.repository import extract_keywords
 from app.kernel.state import Episode, Phase
 from app.kernel.vector_memory import VectorMemory
+from app.kernel.events import publish as publish_event
 from app.tools import clusterer, log_reader
 
 
@@ -354,10 +355,180 @@ class EvolutionLoop:
                 )
             except Exception:
                 analysis = None  # LLM hiccup -> heuristic fallback
+            llm_ok = isinstance(analysis, dict) and not analysis.get("parse_error")
+            if (
+                llm_ok
+                and bool(getattr(self.settings, "critic_enabled", True))
+                and callable(getattr(self.llm, "critic_review", None))
+                and callable(getattr(self.llm, "stash_usage", None))
+            ):
+                # v2.0 dual-review: park the first call's token usage aside (the
+                # critic/reflexion calls would overwrite the thread-local slot),
+                # let the Critic Agent audit, then restore it for _timed()'s
+                # analyze-stage attribution — every extra call gets its own
+                # trace entry, so the token budget breaker counts them all.
+                first_usage = self._take_usage()
+                analysis = self._critique_and_revise(
+                    ep,
+                    analysis,
+                    context={
+                        "errors": clustered_errors,
+                        "extra": extra,
+                        "lessons": lessons,
+                        "failed": failed,
+                        "similar": similar,
+                    },
+                    first_usage=first_usage,
+                )
         if not isinstance(analysis, dict) or analysis.get("parse_error"):
             analysis = self._heuristic_analysis(clustered_errors)
         ep.analysis = analysis
         self.memory.save(ep)
+
+    def _critique_and_revise(
+        self, ep: Episode, analysis: dict, context: dict, first_usage: Optional[dict]
+    ) -> dict:
+        """Dual-review (v2.0): the Critic Agent audits the Analyst conclusion
+        ("evidence-backed? omissions? logic jumps?"); substantive objections
+        (verdict=revise) trigger a Reflexion round where the Analyst re-reasons
+        with the criticism injected into the prompt.
+
+        Every round lands in ep.trace (stage critic_review / reflexion) and on
+        the SSE event bus, so the dashboard shows the internal debate. Fail-soft:
+        a broken/unusable critic never blocks, replaces, or delays the analysis.
+        """
+        critic_fn = getattr(self.llm, "critic_review", None)
+        if not callable(critic_fn):
+            self._stash_usage(first_usage)
+            return analysis
+        max_rounds = max(0, int(getattr(self.settings, "critic_max_reflexion_rounds", 1)))
+        review: Optional[dict] = None
+        try:
+            for round_idx in range(max_rounds + 1):
+                started = time.perf_counter()
+                try:
+                    review = critic_fn(errors=context["errors"], analysis=analysis)
+                except Exception:
+                    review = None
+                usage = self._take_usage()
+                duration_ms = round((time.perf_counter() - started) * 1000.0, 2)
+                if not isinstance(review, dict) or review.get("parse_error"):
+                    if review is not None:
+                        # unusable critic output: record it, keep the analysis
+                        self._trace_critic(
+                            ep, round_idx, {"verdict": "unusable", "objections": []}, usage, duration_ms
+                        )
+                    break
+                verdict = str(review.get("verdict", "")).strip().lower()
+                objections = [str(o) for o in (review.get("objections") or []) if str(o).strip()]
+                self._trace_critic(ep, round_idx, review, usage, duration_ms)
+                if verdict != "revise" or not objections:
+                    break
+                if round_idx >= max_rounds:
+                    break  # reflexion budget exhausted: keep the current analysis
+                revised = self._reflexion(ep, round_idx, context, objections)
+                if revised is None:
+                    break  # re-analysis failed/parsed badly: keep the previous one
+                analysis = revised
+        finally:
+            self._stash_usage(first_usage)
+        # surface the final verdict in the analysis payload (API/dashboard visibility)
+        if isinstance(review, dict) and not review.get("parse_error"):
+            analysis = dict(analysis)
+            analysis["critic_review"] = {
+                "verdict": str(review.get("verdict", "")),
+                "objections": [str(o) for o in (review.get("objections") or [])],
+            }
+        return analysis
+
+    def _reflexion(
+        self, ep: Episode, round_idx: int, context: dict, objections: List[str]
+    ) -> Optional[dict]:
+        """One Reflexion round: re-run the analysis with the critic's objections
+        injected; returns the revised dict or None (previous analysis is kept)."""
+        started = time.perf_counter()
+        try:
+            revised = self.llm.analyze(
+                errors=context["errors"],
+                extra=context["extra"],
+                lessons=context["lessons"],
+                failed=context["failed"],
+                similar=context["similar"],
+                critic_feedback=objections,
+            )
+        except Exception:
+            revised = None
+        usage = self._take_usage()
+        valid = isinstance(revised, dict) and not revised.get("parse_error")
+        ep.trace.append(
+            {
+                "stage": "reflexion",
+                "iteration": ep.iteration,
+                "phase": ep.phase.value,
+                "timestamp": _now(),
+                "duration_ms": round((time.perf_counter() - started) * 1000.0, 2),
+                "llm": usage,
+                "detail": {
+                    "round": round_idx + 1,
+                    "objections_fed": len(objections),
+                    "revised": valid,
+                },
+            }
+        )
+        publish_event(
+            "critic_review",
+            {
+                "episode_id": ep.id,
+                "kind": "reflexion",
+                "round": round_idx + 1,
+                "objections": objections[:5],
+                "revised": valid,
+            },
+        )
+        return revised if valid else None
+
+    def _trace_critic(
+        self, ep: Episode, round_idx: int, review: dict, usage: Optional[dict], duration_ms: float
+    ) -> None:
+        """Record one Critic verdict into the episode trace + SSE bus."""
+        objections = [str(o) for o in (review.get("objections") or [])]
+        ep.trace.append(
+            {
+                "stage": "critic_review",
+                "iteration": ep.iteration,
+                "phase": ep.phase.value,
+                "timestamp": _now(),
+                "duration_ms": duration_ms,
+                "llm": usage,
+                "detail": {
+                    "round": round_idx,
+                    "verdict": str(review.get("verdict", "")),
+                    "objections": objections,
+                    "missing_evidence": [str(m) for m in (review.get("missing_evidence") or [])],
+                    "logic_issues": [str(m) for m in (review.get("logic_issues") or [])],
+                    "confidence": review.get("confidence"),
+                },
+            }
+        )
+        publish_event(
+            "critic_review",
+            {
+                "episode_id": ep.id,
+                "kind": "verdict",
+                "round": round_idx,
+                "verdict": str(review.get("verdict", "")),
+                "objections": objections[:5],
+            },
+        )
+
+    def _stash_usage(self, usage: Optional[dict]) -> None:
+        """Re-park a taken usage record so _timed()'s stage attribution still
+        sees the first LLM call's tokens (best-effort; fakes may not support it)."""
+        if usage is None:
+            return
+        stash = getattr(self.llm, "stash_usage", None)
+        if callable(stash):
+            stash(usage)
 
     def _retrieve_similar(
         self, ep: Episode, raw_errors: List[str], clustered_errors: List[str]
