@@ -30,6 +30,12 @@ AI-assisted ops without giving an agent a root shell.
 ![Docker ready](https://img.shields.io/badge/docker-ready-blue)
 ![License MIT](https://img.shields.io/badge/license-MIT-green)
 
+<div align="center">
+  <video src="docs/assets/demo_attack.mp4" autoplay loop muted playsinline width="800"></video>
+  <p><i>Live Demo: Intercepting malicious LLM prompt injection at the AST layer (100% real defense chain).</i></p>
+  <p><i>(If the video does not autoplay in your browser, <a href="docs/assets/demo_attack.mp4">watch the full clip here</a> — reproduce it yourself with <code>python scripts/demo_attack.py</code>.)</i></p>
+</div>
+
 **中文** · 基于本地大模型（Ollama）的 **AIOps 智能运维 Agent**，定位是「**只读分析、辅助决策**」。
 事件驱动：主动监听日志 → 规则触发 → 自驱分析 → Webhook 告警；独立引擎通过 HTTP 供外部系统接入。
 
