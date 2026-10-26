@@ -4,11 +4,13 @@ FastAPI routes and the CLI."""
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import List
 
 from app.config import settings
 from app.kernel.loop import EvolutionLoop
 from app.kernel.repository import EpisodeRepository
 from app.kernel.sqlite_repository import SqliteEpisodeRepository
+from app.kernel.vector_memory import VectorMemory
 from app.llm.ollama_client import OllamaClient
 from app.tools.registry import ToolRegistry
 
@@ -56,12 +58,35 @@ def get_llm() -> OllamaClient:
 
 
 @lru_cache(maxsize=1)
+def get_vector_memory() -> VectorMemory:
+    """Local semantic long-term memory (pure-Python vector store + Ollama
+    embeddings). Fail-soft by design: if the embedding model is missing or Ollama
+    is down, remember()/search() degrade and the kernel falls back to Jaccard."""
+    if not settings.vector_memory_enabled:
+        return VectorMemory(settings.vector_db_path, embed_fn=None, enabled=False)
+    client = get_llm()
+
+    def _embed(text: str) -> List[float]:
+        return client.embed(text, model=settings.embedding_model)
+
+    return VectorMemory(
+        settings.vector_db_path,
+        embed_fn=_embed,
+        enabled=True,
+        top_k=settings.vector_top_k,
+        threshold=settings.vector_similarity_threshold,
+        max_items=settings.vector_max_items,
+    )
+
+
+@lru_cache(maxsize=1)
 def get_loop() -> EvolutionLoop:
-    """Self-evolution main loop (assembles memory/tools/llm)."""
+    """Self-evolution main loop (assembles memory/tools/llm/vector memory)."""
     return EvolutionLoop(
         settings=settings,
         memory=get_memory(),
         tools=get_tools(),
         llm=get_llm(),
         auto_approve_readonly=settings.auto_approve_readonly,
+        vector_memory=get_vector_memory(),
     )

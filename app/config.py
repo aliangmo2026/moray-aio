@@ -29,6 +29,16 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     """Read-only settings. Defaults target the MoRay main project; override via MORAY_AIO_* env vars."""
@@ -146,6 +156,29 @@ class Settings:
     # Rate limiting: analysis-triggering endpoints, per client IP per minute; 0 disables
     rate_limit_per_minute: int = field(
         default_factory=lambda: _env_int("MORAY_AIO_RATE_LIMIT_PER_MINUTE", 5)
+    )
+
+    # ---- Semantic long-term memory (v2.0.0) ----
+    # Master switch; when off (or the embedding model is missing) the kernel
+    # silently uses keyword Jaccard retrieval instead
+    vector_memory_enabled: bool = field(
+        default_factory=lambda: _env_bool("MORAY_AIO_VECTOR_MEMORY_ENABLED", True)
+    )
+    vector_db_path: str = field(
+        default_factory=lambda: _env_str("MORAY_AIO_VECTOR_DB_PATH", "data/vector_memory.sqlite3")
+    )
+    # Local Ollama embedding model (pull: ollama pull nomic-embed-text)
+    embedding_model: str = field(
+        default_factory=lambda: _env_str("MORAY_AIO_EMBEDDING_MODEL", "nomic-embed-text")
+    )
+    vector_top_k: int = field(default_factory=lambda: _env_int("MORAY_AIO_VECTOR_TOP_K", 3))
+    # Minimum cosine similarity for a stored case to count as "similar"
+    vector_similarity_threshold: float = field(
+        default_factory=lambda: _env_float("MORAY_AIO_VECTOR_SIMILARITY_THRESHOLD", 0.35)
+    )
+    # Upper bound on stored episodes (oldest evicted first)
+    vector_max_items: int = field(
+        default_factory=lambda: _env_int("MORAY_AIO_VECTOR_MAX_ITEMS", 500)
     )
 
     @property

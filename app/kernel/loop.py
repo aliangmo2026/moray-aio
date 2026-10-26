@@ -15,12 +15,13 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.kernel import approval
 from app.kernel.planner import propose_tasks
 from app.kernel.repository import extract_keywords
 from app.kernel.state import Episode, Phase
+from app.kernel.vector_memory import VectorMemory
 from app.tools import clusterer, log_reader
 
 
@@ -31,12 +32,23 @@ def _now() -> str:
 class EvolutionLoop:
     """Read-only self-evolution kernel."""
 
-    def __init__(self, settings, memory, tools, llm=None, auto_approve_readonly: bool = True):
+    def __init__(
+        self,
+        settings,
+        memory,
+        tools,
+        llm=None,
+        auto_approve_readonly: bool = True,
+        vector_memory: Optional[VectorMemory] = None,
+    ):
         self.settings = settings
         self.memory = memory
         self.tools = tools
         self.llm = llm
         self.auto_approve_readonly = bool(auto_approve_readonly)
+        # Semantic long-term memory (v2.0). Optional and fail-soft: when absent
+        # or unavailable, _retrieve_similar falls back to keyword Jaccard.
+        self.vector_memory = vector_memory
         self._episodes: Dict[str, Episode] = {}
         # Async execution: the loop is fully synchronous code, so a thread pool is
         # simpler and more direct than FastAPI BackgroundTasks
@@ -316,12 +328,18 @@ class EvolutionLoop:
         extra = self._summarize_extra(ep)
         lessons = [r["lesson"] for r in self.memory.recent_reflections(limit=5)]
         failed = self._failed_tasks(ep)
-        # Retrieve similar history episodes (keyword Jaccard, no embeddings)
-        keywords = extract_keywords(raw_errors, top_n=10)
-        similar = (
-            self.memory.find_similar(keywords, top_k=3, exclude_episode_id=ep.id)
-            if keywords
-            else []
+        # Retrieve similar history: semantic vector memory first, keyword Jaccard fallback
+        similar, retrieval_mode = self._retrieve_similar(ep, raw_errors, clustered_errors)
+        ep.trace.append(
+            {
+                "stage": "memory_retrieval",
+                "iteration": ep.iteration,
+                "phase": ep.phase.value,
+                "timestamp": _now(),
+                "duration_ms": 0.0,
+                "llm": None,
+                "detail": {"mode": retrieval_mode, "hits": len(similar)},
+            }
         )
 
         analysis: Optional[dict] = None
@@ -340,6 +358,33 @@ class EvolutionLoop:
             analysis = self._heuristic_analysis(clustered_errors)
         ep.analysis = analysis
         self.memory.save(ep)
+
+    def _retrieve_similar(
+        self, ep: Episode, raw_errors: List[str], clustered_errors: List[str]
+    ) -> Tuple[List[dict], str]:
+        """Retrieve similar historical conclusions for the LLM prompt.
+
+        v2.0 order: semantic vector memory (Ollama embeddings + local vector
+        store) first; keyword Jaccard as the guaranteed fallback. Returns
+        (cases, mode) where mode is "vector" / "jaccard" / "none" (traceable).
+        Any vector-memory failure degrades to Jaccard, never raises.
+        """
+        vm = self.vector_memory
+        if vm is not None:
+            query = "\n".join(list(clustered_errors)[:10])
+            try:
+                hits = vm.search(query, top_k=3, exclude_episode_id=ep.id) if query else []
+            except Exception:  # noqa: BLE001 — memory must never break analysis
+                hits = []
+            if hits:
+                return hits, "vector"
+        keywords = extract_keywords(raw_errors, top_n=10)
+        similar = (
+            self.memory.find_similar(keywords, top_k=3, exclude_episode_id=ep.id)
+            if keywords
+            else []
+        )
+        return similar, ("jaccard" if similar else "none")
 
     @staticmethod
     def _summarize_extra(ep: Episode) -> List[dict]:
@@ -444,10 +489,47 @@ class EvolutionLoop:
         ep.conclusion = analysis.get("conclusion") or (
             "This run ended (max rounds reached or no new investigation tasks)."
         )
+        self._remember_conclusion(ep)
         if ep.phase != Phase.CONCLUDED:
             ep.transition(Phase.CONCLUDED)
         self._reflect(ep)
         self.memory.save(ep)
+
+    def _remember_conclusion(self, ep: Episode) -> None:
+        """Write (error features + conclusion) into semantic long-term memory so
+        future episodes can retrieve it by meaning. Fail-soft: a memory failure
+        never blocks concluding, and it is visible in the trace."""
+        vm = self.vector_memory
+        if vm is None or not ep.conclusion:
+            return
+        query = self._memory_query_text(ep)
+        if not query:
+            return
+        started = time.perf_counter()
+        try:
+            stored = vm.remember(ep.id, query, str(ep.conclusion))
+        except Exception:  # noqa: BLE001 — fail-soft by contract
+            stored = False
+        ep.trace.append(
+            {
+                "stage": "memory_write",
+                "iteration": ep.iteration,
+                "phase": ep.phase.value,
+                "timestamp": _now(),
+                "duration_ms": round((time.perf_counter() - started) * 1000.0, 2),
+                "llm": None,
+                "detail": {"stored": stored},
+            }
+        )
+
+    @staticmethod
+    def _memory_query_text(ep: Episode) -> str:
+        """The error-feature text used as the memory key (latest error block)."""
+        for obs in reversed(ep.observations):
+            if obs.get("kind") == "recent_errors":
+                lines = [str(e.get("text", "")) for e in obs.get("errors", []) if e.get("text")]
+                return "\n".join(lines)[:4000]
+        return ""
 
     def _reflect(self, ep: Episode) -> None:
         done = sum(1 for t in ep.tasks if t.get("status") == "done")

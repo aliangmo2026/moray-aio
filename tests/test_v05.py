@@ -79,9 +79,13 @@ def test_trace_and_metrics(tmp_path, monkeypatch):
 
     ep = loop.start()
 
-    # the trace covers every core stage with correct token attribution
+    # the trace covers every core stage (in order) with correct token attribution;
+    # v2.0 adds memory_retrieval/memory_write entries around them, so assert the
+    # core stages appear as an ordered subsequence rather than the exact list
     stages = [e["stage"] for e in ep.trace]
-    assert stages == ["observe", "analyze", "propose", "execute"]
+    core = ["observe", "analyze", "propose", "execute"]
+    positions = [stages.index(name) for name in core]
+    assert positions == sorted(positions), "core stages must stay in order: {}".format(stages)
     for entry in ep.trace:
         assert entry["duration_ms"] >= 0
         assert entry["timestamp"]
@@ -101,7 +105,7 @@ def test_trace_and_metrics(tmp_path, monkeypatch):
     client = TestClient(create_app(dataclasses.replace(Settings(), rate_limit_per_minute=0)))
 
     ep_body = client.get("/episodes/{}".format(ep.id)).json()
-    assert ep_body["trace"] and len(ep_body["trace"]) == 4
+    assert ep_body["trace"] and len(ep_body["trace"]) >= 4
 
     body = client.get("/metrics").json()
     assert body["total_episodes"] == 1

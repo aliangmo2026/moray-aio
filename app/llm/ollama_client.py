@@ -40,6 +40,7 @@ DEFAULT_ALLOWED_HOSTS: FrozenSet[str] = frozenset({"127.0.0.1", "localhost", "::
 # Fixed path constants: request URL = validated origin + one of these
 _TAGS_PATH = "/api/tags"
 _GENERATE_PATH = "/api/generate"
+_EMBEDDINGS_PATH = "/api/embeddings"
 
 # Exponential backoff: at most 3 retries, 1s / 2s / 4s
 RETRY_DELAYS: Tuple[float, ...] = (1.0, 2.0, 4.0)
@@ -88,6 +89,7 @@ class OllamaClient:
         )
         self.model = model
         self.timeout = int(timeout)
+        self._allowed_hosts = whitelist
         self._available: Optional[bool] = None
         # Token/retry usage is thread-local: background workers run episodes
         # concurrently and must not overwrite each other's attribution
@@ -96,7 +98,7 @@ class OllamaClient:
     def _endpoint(self, path: str) -> str:
         """Build a request URL: only fixed path constants are accepted; the origin
         was validated (scheme + host whitelist) in __init__."""
-        if path not in (_TAGS_PATH, _GENERATE_PATH):
+        if path not in (_TAGS_PATH, _GENERATE_PATH, _EMBEDDINGS_PATH):
             raise ValueError("unknown endpoint path: {!r}".format(path))
         return self._origin + path
 
@@ -170,6 +172,27 @@ class OllamaClient:
         usage = getattr(self._tls, "last_usage", None)
         self._tls.last_usage = None
         return usage
+
+    def embed(self, text: str, model: Optional[str] = None, timeout: int = 15) -> List[float]:
+        """Embed one text via POST /api/embeddings (vector memory path).
+
+        SSRF gate identical to the chat path: the request URL is the origin
+        validated in __init__ (scheme + host whitelist) plus the fixed
+        _EMBEDDINGS_PATH constant — no external input ever reaches the URL, and
+        the host is re-checked against the whitelist right before the request.
+        """
+        url = self._endpoint(_EMBEDDINGS_PATH)  # validated origin + fixed path only
+        host = (urlsplit(url).hostname or "").lower()
+        if host not in self._allowed_hosts:
+            raise ValueError("embed host {!r} is not in the allowed hosts whitelist".format(host))
+        resp = httpx.post(
+            url, json={"model": model or self.model, "prompt": str(text)}, timeout=timeout
+        )
+        resp.raise_for_status()
+        embedding = resp.json().get("embedding")
+        if not isinstance(embedding, list) or not embedding:
+            raise ValueError("ollama /api/embeddings returned no embedding vector")
+        return [float(v) for v in embedding]
 
     @staticmethod
     def _parse_json(raw: str) -> Dict[str, Any]:
