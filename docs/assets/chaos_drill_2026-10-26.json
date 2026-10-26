@@ -1,0 +1,943 @@
+{
+  "drill_date": "2026-10-26",
+  "system": "moray-aio v2.0.1",
+  "honesty_note": "Real production code paths only: fake_redis is the injected target; planner/analyst were not simulated. Episode A ran the real local LLM (qwen2.5:7b, no degradation); Episodes B/C ran the heuristic fallback (LLM endpoint deliberately unreachable).",
+  "environment": {
+    "fake_redis": "python TCP fake on 127.0.0.1:6379 (pid 460), RESP PING->+PONG verified",
+    "watched_log": "%TEMP%/moray-chaos/moray.err.log",
+    "watch_poll_interval_seconds": 1,
+    "llm_model": "qwen2.5:7b + nomic-embed-text (real, no degradation)"
+  },
+  "injected_error_line": "2026-10-26 10:00:00 ERROR Connection refused to redis 127.0.0.1:6379",
+  "timeline_utc": {
+    "t_kill_fake_redis": "2026-10-26T12:39:47.568+00:00",
+    "port_6379_after_kill": "closed",
+    "t_append_line1": "2026-10-26T12:39:49.834+00:00",
+    "rule_critical_keywords_fired": "2026-10-26T12:39:49.932860+00:00",
+    "capture_latency_ms": 98.9,
+    "alert_pushed": "2026-10-26T12:41:00.597610+00:00",
+    "t_append_line3": "2026-10-26T12:49:24.465+00:00",
+    "rule_fired_line3": "2026-10-26T12:49:25.159401+00:00",
+    "capture_latency_heuristic_ms": 694.0
+  },
+  "probe_evidence_heuristic": {
+    "port_check": {
+      "host": "127.0.0.1",
+      "port": 6379,
+      "open": false,
+      "latency_ms": null
+    },
+    "process_list": {
+      "name_pattern": "redis",
+      "count": 0,
+      "processes": [],
+      "source": "psutil"
+    },
+    "windows_service_status": {
+      "name": "redis",
+      "state": "UNKNOWN",
+      "error": "probe_failed"
+    }
+  },
+  "episode_A_real_llm": {
+    "id": "757b148d-a972-4a34-ad8a-302c43926713",
+    "trigger": "watch:critical_keywords",
+    "phase": "concluded",
+    "iteration": 3,
+    "observations": [
+      {
+        "iteration": 0,
+        "kind": "recent_errors",
+        "mode": "single",
+        "source": "C:\\Users\\莫\\AppData\\Local\\Temp\\moray-chaos\\moray.err.log",
+        "errors": [
+          {
+            "text": "2026-10-26 09:59:00 INFO  moray-fake baseline: service started, redis pool warm (chaos drill baseline line, no ERROR)",
+            "offset": 0
+          },
+          {
+            "text": "2026-10-26 10:00:00 ERROR Connection refused to redis 127.0.0.1:6379",
+            "offset": 118
+          }
+        ]
+      },
+      {
+        "iteration": 1,
+        "kind": "task_result",
+        "task_id": "9f22777d171d",
+        "tool": "log_grep",
+        "status": "done",
+        "result": [
+          "2026-10-26 10:00:00 ERROR Connection refused to redis 127.0.0.1:6379"
+        ],
+        "error": null
+      },
+      {
+        "iteration": 2,
+        "kind": "task_result",
+        "task_id": "3dee9cf43ce1",
+        "tool": "log_tail",
+        "status": "done",
+        "result": [
+          "2026-10-26 09:59:00 INFO  moray-fake baseline: service started, redis pool warm (chaos drill baseline line, no ERROR)",
+          "2026-10-26 10:00:00 ERROR Connection refused to redis 127.0.0.1:6379"
+        ],
+        "error": null
+      }
+    ],
+    "analysis": {
+      "summary": "错误日志显示存在一次Redis连接被拒绝的情况，但服务启动日志表明Redis池已成功预热。",
+      "likely_root_causes": [
+        "建议：检查Redis服务状态和配置，确保其正确运行并监听正确的端口。",
+        "建议：确认网络连接和防火墙设置，确保服务间通信无阻。"
+      ],
+      "information_gaps": [
+        "需要确认Redis服务是否正确启动并监听指定端口。",
+        "需要检查网络配置和防火墙设置，确保服务间通信畅通。"
+      ],
+      "conclusion": "当前错误日志仅表明存在一次Redis连接被拒绝的情况，但服务启动日志显示Redis池已成功预热。建议进一步检查Redis服务状态和配置，确保其正确运行并监听正确的端口。同时，确认网络配置和防火墙设置，确保服务间通信畅通。",
+      "critic_review": {
+        "verdict": "pass",
+        "objections": []
+      }
+    },
+    "tasks": [
+      {
+        "id": "9f22777d171d",
+        "tool": "log_grep",
+        "params": {
+          "path": "C:\\Users\\莫\\AppData\\Local\\Temp\\moray-chaos\\moray.err.log",
+          "pattern": "Connection refused to redis 127.0.0.1:6379",
+          "limit": 50
+        },
+        "rationale": "确认错误日志中关于连接被拒绝的具体信息，帮助定位问题",
+        "risk": "low",
+        "status": "done",
+        "result": [
+          "2026-10-26 10:00:00 ERROR Connection refused to redis 127.0.0.1:6379"
+        ],
+        "created_at": "2026-10-26T12:40:13.176457+00:00"
+      },
+      {
+        "id": "3dee9cf43ce1",
+        "tool": "log_tail",
+        "params": {
+          "path": "C:\\Users\\莫\\AppData\\Local\\Temp\\moray-chaos\\moray.err.log",
+          "n": 50,
+          "keyword": "redis"
+        },
+        "rationale": "检查最近的日志中是否有与redis相关的其他错误信息，帮助确认是否为单一事件或持续问题",
+        "risk": "low",
+        "status": "done",
+        "result": [
+          "2026-10-26 09:59:00 INFO  moray-fake baseline: service started, redis pool warm (chaos drill baseline line, no ERROR)",
+          "2026-10-26 10:00:00 ERROR Connection refused to redis 127.0.0.1:6379"
+        ],
+        "created_at": "2026-10-26T12:40:31.362206+00:00"
+      }
+    ],
+    "conclusion": "当前错误日志仅表明存在一次Redis连接被拒绝的情况，但服务启动日志显示Redis池已成功预热。建议进一步检查Redis服务状态和配置，确保其正确运行并监听正确的端口。同时，确认网络配置和防火墙设置，确保服务间通信畅通。",
+    "error": null,
+    "trace": [
+      {
+        "stage": "observe",
+        "iteration": 0,
+        "phase": "observing",
+        "timestamp": "2026-10-26T12:39:49.938859+00:00",
+        "duration_ms": 0.66,
+        "llm": null
+      },
+      {
+        "stage": "memory_retrieval",
+        "iteration": 1,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:39:50.077531+00:00",
+        "duration_ms": 0.0,
+        "llm": null,
+        "detail": {
+          "mode": "none",
+          "hits": 0
+        }
+      },
+      {
+        "stage": "critic_review",
+        "iteration": 1,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:40:06.200004+00:00",
+        "duration_ms": 4076.25,
+        "llm": {
+          "prompt_tokens": 766,
+          "completion_tokens": 187,
+          "retries": 0
+        },
+        "detail": {
+          "round": 0,
+          "verdict": "revise",
+          "objections": [
+            "结论中的根因假设没有直接证据支撑，仅凭观察结果无法确定服务启动时的连接尝试是否在Redis未准备好时发生。",
+            "逻辑跳跃：从错误日志到根因假设的推理存在断层，没有明确的证据表明服务启动时的连接尝试导致了错误。"
+          ],
+          "missing_evidence": [
+            "需要确认服务启动时的具体时间与Redis准备就绪的时间间隔"
+          ],
+          "logic_issues": [
+            "把相关性当因果：假设服务启动时的连接尝试导致了错误，但没有直接证据支持这一假设。",
+            "时间先后当因果：虽然错误发生在服务启动后，但没有证据表明服务启动时的连接尝试是导致错误的原因。"
+          ],
+          "confidence": 0.6
+        }
+      },
+      {
+        "stage": "reflexion",
+        "iteration": 1,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:40:09.696992+00:00",
+        "duration_ms": 3496.36,
+        "llm": {
+          "prompt_tokens": 654,
+          "completion_tokens": 171,
+          "retries": 0
+        },
+        "detail": {
+          "round": 1,
+          "objections_fed": 2,
+          "revised": true
+        }
+      },
+      {
+        "stage": "critic_review",
+        "iteration": 1,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:40:10.609898+00:00",
+        "duration_ms": 913.46,
+        "llm": {
+          "prompt_tokens": 778,
+          "completion_tokens": 39,
+          "retries": 0
+        },
+        "detail": {
+          "round": 1,
+          "verdict": "pass",
+          "objections": [],
+          "missing_evidence": [],
+          "logic_issues": [],
+          "confidence": 1.0
+        }
+      },
+      {
+        "stage": "analyze",
+        "iteration": 1,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:40:10.611514+00:00",
+        "duration_ms": 20672.21,
+        "llm": {
+          "prompt_tokens": 591,
+          "completion_tokens": 159,
+          "retries": 0
+        }
+      },
+      {
+        "stage": "propose",
+        "iteration": 1,
+        "phase": "proposing",
+        "timestamp": "2026-10-26T12:40:13.177260+00:00",
+        "duration_ms": 2565.93,
+        "llm": {
+          "prompt_tokens": 1042,
+          "completion_tokens": 102,
+          "retries": 0
+        }
+      },
+      {
+        "stage": "execute",
+        "iteration": 1,
+        "phase": "executing",
+        "timestamp": "2026-10-26T12:40:13.179312+00:00",
+        "duration_ms": 1.79,
+        "llm": null
+      },
+      {
+        "stage": "memory_retrieval",
+        "iteration": 2,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:40:16.565772+00:00",
+        "duration_ms": 0.0,
+        "llm": null,
+        "detail": {
+          "mode": "none",
+          "hits": 0
+        }
+      },
+      {
+        "stage": "critic_review",
+        "iteration": 2,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:40:28.874043+00:00",
+        "duration_ms": 1172.98,
+        "llm": {
+          "prompt_tokens": 705,
+          "completion_tokens": 39,
+          "retries": 0
+        },
+        "detail": {
+          "round": 0,
+          "verdict": "pass",
+          "objections": [],
+          "missing_evidence": [],
+          "logic_issues": [],
+          "confidence": 1.0
+        }
+      },
+      {
+        "stage": "analyze",
+        "iteration": 2,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:40:28.895067+00:00",
+        "duration_ms": 15715.38,
+        "llm": {
+          "prompt_tokens": 683,
+          "completion_tokens": 98,
+          "retries": 0
+        }
+      },
+      {
+        "stage": "propose",
+        "iteration": 2,
+        "phase": "proposing",
+        "timestamp": "2026-10-26T12:40:31.363985+00:00",
+        "duration_ms": 2469.02,
+        "llm": {
+          "prompt_tokens": 1242,
+          "completion_tokens": 90,
+          "retries": 0
+        }
+      },
+      {
+        "stage": "execute",
+        "iteration": 2,
+        "phase": "executing",
+        "timestamp": "2026-10-26T12:40:31.365981+00:00",
+        "duration_ms": 2.7,
+        "llm": null
+      },
+      {
+        "stage": "memory_retrieval",
+        "iteration": 3,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:40:34.786024+00:00",
+        "duration_ms": 0.0,
+        "llm": null,
+        "detail": {
+          "mode": "none",
+          "hits": 0
+        }
+      },
+      {
+        "stage": "critic_review",
+        "iteration": 3,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:40:49.802157+00:00",
+        "duration_ms": 3625.62,
+        "llm": {
+          "prompt_tokens": 706,
+          "completion_tokens": 164,
+          "retries": 0
+        },
+        "detail": {
+          "round": 0,
+          "verdict": "revise",
+          "objections": [
+            "结论中的根因假设缺乏直接证据支撑，仅凭一次错误日志无法确定Redis实例未启动或配置错误。",
+            "结论直接建议检查Redis服务状态和配置，但缺乏足够的证据来支持这一建议。"
+          ],
+          "missing_evidence": [
+            "需要更多关于Redis服务状态的日志，如启动日志、错误日志等。",
+            "需要确认Redis配置文件中的设置是否正确，以及是否有其他服务依赖于这些配置。"
+          ],
+          "logic_issues": [
+            "仅凭一次错误日志就推断出Redis实例未启动或配置错误，存在逻辑跳跃。"
+          ],
+          "confidence": 0.6
+        }
+      },
+      {
+        "stage": "reflexion",
+        "iteration": 3,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:40:53.618513+00:00",
+        "duration_ms": 3816.5,
+        "llm": {
+          "prompt_tokens": 863,
+          "completion_tokens": 187,
+          "retries": 0
+        },
+        "detail": {
+          "round": 1,
+          "objections_fed": 2,
+          "revised": true
+        }
+      },
+      {
+        "stage": "critic_review",
+        "iteration": 3,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:40:54.584038+00:00",
+        "duration_ms": 965.78,
+        "llm": {
+          "prompt_tokens": 794,
+          "completion_tokens": 39,
+          "retries": 0
+        },
+        "detail": {
+          "round": 1,
+          "verdict": "pass",
+          "objections": [],
+          "missing_evidence": [],
+          "logic_issues": [],
+          "confidence": 1.0
+        }
+      },
+      {
+        "stage": "analyze",
+        "iteration": 3,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:40:54.585536+00:00",
+        "duration_ms": 23219.19,
+        "llm": {
+          "prompt_tokens": 817,
+          "completion_tokens": 99,
+          "retries": 0
+        }
+      },
+      {
+        "stage": "propose",
+        "iteration": 3,
+        "phase": "proposing",
+        "timestamp": "2026-10-26T12:40:57.192332+00:00",
+        "duration_ms": 2606.54,
+        "llm": {
+          "prompt_tokens": 1473,
+          "completion_tokens": 90,
+          "retries": 0
+        }
+      },
+      {
+        "stage": "memory_write",
+        "iteration": 3,
+        "phase": "proposing",
+        "timestamp": "2026-10-26T12:41:00.555974+00:00",
+        "duration_ms": 3363.42,
+        "llm": null,
+        "detail": {
+          "stored": true
+        }
+      }
+    ],
+    "created_at": "2026-10-26T12:39:49.932860+00:00",
+    "updated_at": "2026-10-26T12:41:00.555974+00:00"
+  },
+  "episode_B_heuristic": {
+    "id": "ad0af26b-dbb0-4ba5-a11c-b7890c0206a7",
+    "trigger": "watch:critical_keywords",
+    "phase": "concluded",
+    "iteration": 2,
+    "observations": [
+      {
+        "iteration": 0,
+        "kind": "recent_errors",
+        "mode": "single",
+        "source": "C:\\Users\\莫\\AppData\\Local\\Temp\\moray-chaos\\moray.err.log",
+        "errors": [
+          {
+            "text": "2026-10-26 09:59:00 INFO  moray-fake baseline: service started, redis pool warm (chaos drill baseline line, no ERROR)",
+            "offset": 0
+          },
+          {
+            "text": "2026-10-26 10:00:00 ERROR Connection refused to redis 127.0.0.1:6379",
+            "offset": 118
+          }
+        ]
+      },
+      {
+        "iteration": 1,
+        "kind": "task_result",
+        "task_id": "180cb2eede5b",
+        "tool": "log_grep",
+        "status": "done",
+        "result": [
+          "2026-10-26 10:00:00 ERROR Connection refused to redis 127.0.0.1:6379"
+        ],
+        "error": null
+      },
+      {
+        "iteration": 1,
+        "kind": "probe",
+        "task_id": "fe120b302175",
+        "tool": "port_check",
+        "status": "done",
+        "result": {
+          "host": "127.0.0.1",
+          "port": 6379,
+          "open": false,
+          "latency_ms": null
+        },
+        "error": null
+      },
+      {
+        "iteration": 1,
+        "kind": "probe",
+        "task_id": "28ad35bd908f",
+        "tool": "process_list",
+        "status": "done",
+        "result": {
+          "count": 0,
+          "processes": [],
+          "source": "psutil"
+        },
+        "error": null
+      },
+      {
+        "iteration": 1,
+        "kind": "probe",
+        "task_id": "43d9aaed1169",
+        "tool": "windows_service_status",
+        "status": "done",
+        "result": {
+          "name": "redis",
+          "state": "UNKNOWN",
+          "error": "probe_failed",
+          "detail": "FileNotFoundError: [WinError 2] 系统找不到指定的文件。: '(originated from QueryServiceConfig2W)'",
+          "raw_output": ""
+        },
+        "error": null
+      }
+    ],
+    "analysis": {
+      "summary": "Heuristic attribution: 1 error pattern(s) found in the latest 2 ERROR lines.",
+      "likely_root_causes": [
+        "Suspected downstream service not listening or port blocked (Connection refused/ECONNREFUSED found)."
+      ],
+      "information_gaps": [
+        "Confirm the service process and port manually; this engine is read-only."
+      ],
+      "conclusion": "Preliminary read-only log analysis: Suspected downstream service not listening or port blocked (Connection refused/ECONNREFUSED found). This engine only analyzes and never changes anything; dangerous operations such as restart/cleanup must be evaluated and executed by a human."
+    },
+    "tasks": [
+      {
+        "id": "180cb2eede5b",
+        "tool": "log_grep",
+        "params": {
+          "path": "C:\\Users\\莫\\AppData\\Local\\Temp\\moray-chaos\\moray.err.log",
+          "pattern": "Connection refused|ECONNREFUSED",
+          "limit": 50
+        },
+        "rationale": "Connection refused errors found; trace frequency and targets.",
+        "risk": "low",
+        "status": "done",
+        "result": [
+          "2026-10-26 10:00:00 ERROR Connection refused to redis 127.0.0.1:6379"
+        ],
+        "created_at": "2026-10-26T12:47:23.056158+00:00"
+      },
+      {
+        "id": "fe120b302175",
+        "tool": "port_check",
+        "params": {
+          "host": "127.0.0.1",
+          "port": 6379
+        },
+        "rationale": "probes are read-only: check whether 127.0.0.1:6379 is reachable now.",
+        "risk": "low",
+        "status": "done",
+        "result": {
+          "host": "127.0.0.1",
+          "port": 6379,
+          "open": false,
+          "latency_ms": null
+        },
+        "created_at": "2026-10-26T12:47:23.056158+00:00"
+      },
+      {
+        "id": "28ad35bd908f",
+        "tool": "process_list",
+        "params": {
+          "name_pattern": "redis"
+        },
+        "rationale": "probes are read-only: port 6379 usually means redis; check the process.",
+        "risk": "low",
+        "status": "done",
+        "result": {
+          "count": 0,
+          "processes": [],
+          "source": "psutil"
+        },
+        "created_at": "2026-10-26T12:47:23.056158+00:00"
+      },
+      {
+        "id": "43d9aaed1169",
+        "tool": "windows_service_status",
+        "params": {
+          "service_name": "redis"
+        },
+        "rationale": "probes are read-only: query the Windows service state (never start/stop).",
+        "risk": "low",
+        "status": "done",
+        "result": {
+          "name": "redis",
+          "state": "UNKNOWN",
+          "error": "probe_failed",
+          "detail": "FileNotFoundError: [WinError 2] 系统找不到指定的文件。: '(originated from QueryServiceConfig2W)'",
+          "raw_output": ""
+        },
+        "created_at": "2026-10-26T12:47:23.056158+00:00"
+      }
+    ],
+    "conclusion": "Preliminary read-only log analysis: Suspected downstream service not listening or port blocked (Connection refused/ECONNREFUSED found). This engine only analyzes and never changes anything; dangerous operations such as restart/cleanup must be evaluated and executed by a human.",
+    "error": null,
+    "trace": [
+      {
+        "stage": "observe",
+        "iteration": 0,
+        "phase": "observing",
+        "timestamp": "2026-10-26T12:47:18.905004+00:00",
+        "duration_ms": 1.25,
+        "llm": null
+      },
+      {
+        "stage": "memory_retrieval",
+        "iteration": 1,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:47:18.906004+00:00",
+        "duration_ms": 0.0,
+        "llm": null,
+        "detail": {
+          "mode": "none",
+          "hits": 0
+        }
+      },
+      {
+        "stage": "analyze",
+        "iteration": 1,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:47:21.017523+00:00",
+        "duration_ms": 2111.82,
+        "llm": null
+      },
+      {
+        "stage": "propose",
+        "iteration": 1,
+        "phase": "proposing",
+        "timestamp": "2026-10-26T12:47:23.058107+00:00",
+        "duration_ms": 2040.36,
+        "llm": null
+      },
+      {
+        "stage": "execute",
+        "iteration": 1,
+        "phase": "executing",
+        "timestamp": "2026-10-26T12:47:26.289394+00:00",
+        "duration_ms": 3231.86,
+        "llm": null
+      },
+      {
+        "stage": "memory_retrieval",
+        "iteration": 2,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:47:26.289394+00:00",
+        "duration_ms": 0.0,
+        "llm": null,
+        "detail": {
+          "mode": "none",
+          "hits": 0
+        }
+      },
+      {
+        "stage": "analyze",
+        "iteration": 2,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:47:28.341971+00:00",
+        "duration_ms": 2052.07,
+        "llm": null
+      },
+      {
+        "stage": "propose",
+        "iteration": 2,
+        "phase": "proposing",
+        "timestamp": "2026-10-26T12:47:30.410400+00:00",
+        "duration_ms": 2068.78,
+        "llm": null
+      },
+      {
+        "stage": "memory_write",
+        "iteration": 2,
+        "phase": "proposing",
+        "timestamp": "2026-10-26T12:47:30.410400+00:00",
+        "duration_ms": 0.01,
+        "llm": null,
+        "detail": {
+          "stored": false
+        }
+      }
+    ],
+    "created_at": "2026-10-26T12:47:18.901002+00:00",
+    "updated_at": "2026-10-26T12:47:30.410400+00:00"
+  },
+  "episode_C_heuristic": {
+    "id": "9d3791a9-f242-4079-b294-cc873121b29c",
+    "trigger": "watch:critical_keywords",
+    "phase": "concluded",
+    "iteration": 2,
+    "observations": [
+      {
+        "iteration": 0,
+        "kind": "recent_errors",
+        "mode": "single",
+        "source": "C:\\Users\\莫\\AppData\\Local\\Temp\\moray-chaos\\moray.err.log",
+        "errors": [
+          {
+            "text": "2026-10-26 09:59:00 INFO  moray-fake baseline: service started, redis pool warm (chaos drill baseline line, no ERROR)",
+            "offset": 0
+          },
+          {
+            "text": "2026-10-26 10:00:00 ERROR Connection refused to redis 127.0.0.1:6379",
+            "offset": 118
+          },
+          {
+            "text": "2026-10-26 10:05:00 ERROR Connection refused to redis 127.0.0.1:6379",
+            "offset": 188
+          },
+          {
+            "text": "2026-10-26 10:06:00 ERROR Connection refused to redis 127.0.0.1:6379",
+            "offset": 258
+          }
+        ]
+      },
+      {
+        "iteration": 1,
+        "kind": "task_result",
+        "task_id": "f58bb34f066b",
+        "tool": "log_grep",
+        "status": "done",
+        "result": [
+          "2026-10-26 10:00:00 ERROR Connection refused to redis 127.0.0.1:6379",
+          "2026-10-26 10:05:00 ERROR Connection refused to redis 127.0.0.1:6379",
+          "2026-10-26 10:06:00 ERROR Connection refused to redis 127.0.0.1:6379"
+        ],
+        "error": null
+      },
+      {
+        "iteration": 1,
+        "kind": "probe",
+        "task_id": "19c5e063db74",
+        "tool": "port_check",
+        "status": "done",
+        "result": {
+          "host": "127.0.0.1",
+          "port": 6379,
+          "open": false,
+          "latency_ms": null
+        },
+        "error": null
+      },
+      {
+        "iteration": 1,
+        "kind": "probe",
+        "task_id": "971e407cd481",
+        "tool": "process_list",
+        "status": "done",
+        "result": {
+          "count": 0,
+          "processes": [],
+          "source": "psutil"
+        },
+        "error": null
+      },
+      {
+        "iteration": 1,
+        "kind": "probe",
+        "task_id": "ca29c3613dd4",
+        "tool": "windows_service_status",
+        "status": "done",
+        "result": {
+          "name": "redis",
+          "state": "UNKNOWN",
+          "error": "probe_failed",
+          "detail": "FileNotFoundError: [WinError 2] 系统找不到指定的文件。: '(originated from QueryServiceConfig2W)'",
+          "raw_output": ""
+        },
+        "error": null
+      }
+    ],
+    "analysis": {
+      "summary": "Heuristic attribution: 1 error pattern(s) found in the latest 2 ERROR lines.",
+      "likely_root_causes": [
+        "Suspected downstream service not listening or port blocked (Connection refused/ECONNREFUSED found)."
+      ],
+      "information_gaps": [
+        "Confirm the service process and port manually; this engine is read-only."
+      ],
+      "conclusion": "Preliminary read-only log analysis: Suspected downstream service not listening or port blocked (Connection refused/ECONNREFUSED found). This engine only analyzes and never changes anything; dangerous operations such as restart/cleanup must be evaluated and executed by a human."
+    },
+    "tasks": [
+      {
+        "id": "f58bb34f066b",
+        "tool": "log_grep",
+        "params": {
+          "path": "C:\\Users\\莫\\AppData\\Local\\Temp\\moray-chaos\\moray.err.log",
+          "pattern": "Connection refused|ECONNREFUSED",
+          "limit": 50
+        },
+        "rationale": "Connection refused errors found; trace frequency and targets.",
+        "risk": "low",
+        "status": "done",
+        "result": [
+          "2026-10-26 10:00:00 ERROR Connection refused to redis 127.0.0.1:6379",
+          "2026-10-26 10:05:00 ERROR Connection refused to redis 127.0.0.1:6379",
+          "2026-10-26 10:06:00 ERROR Connection refused to redis 127.0.0.1:6379"
+        ],
+        "created_at": "2026-10-26T12:49:29.283898+00:00"
+      },
+      {
+        "id": "19c5e063db74",
+        "tool": "port_check",
+        "params": {
+          "host": "127.0.0.1",
+          "port": 6379
+        },
+        "rationale": "probes are read-only: check whether 127.0.0.1:6379 is reachable now.",
+        "risk": "low",
+        "status": "done",
+        "result": {
+          "host": "127.0.0.1",
+          "port": 6379,
+          "open": false,
+          "latency_ms": null
+        },
+        "created_at": "2026-10-26T12:49:29.283898+00:00"
+      },
+      {
+        "id": "971e407cd481",
+        "tool": "process_list",
+        "params": {
+          "name_pattern": "redis"
+        },
+        "rationale": "probes are read-only: port 6379 usually means redis; check the process.",
+        "risk": "low",
+        "status": "done",
+        "result": {
+          "count": 0,
+          "processes": [],
+          "source": "psutil"
+        },
+        "created_at": "2026-10-26T12:49:29.283898+00:00"
+      },
+      {
+        "id": "ca29c3613dd4",
+        "tool": "windows_service_status",
+        "params": {
+          "service_name": "redis"
+        },
+        "rationale": "probes are read-only: query the Windows service state (never start/stop).",
+        "risk": "low",
+        "status": "done",
+        "result": {
+          "name": "redis",
+          "state": "UNKNOWN",
+          "error": "probe_failed",
+          "detail": "FileNotFoundError: [WinError 2] 系统找不到指定的文件。: '(originated from QueryServiceConfig2W)'",
+          "raw_output": ""
+        },
+        "created_at": "2026-10-26T12:49:29.283898+00:00"
+      }
+    ],
+    "conclusion": "Preliminary read-only log analysis: Suspected downstream service not listening or port blocked (Connection refused/ECONNREFUSED found). This engine only analyzes and never changes anything; dangerous operations such as restart/cleanup must be evaluated and executed by a human.",
+    "error": null,
+    "trace": [
+      {
+        "stage": "observe",
+        "iteration": 0,
+        "phase": "observing",
+        "timestamp": "2026-10-26T12:49:25.181517+00:00",
+        "duration_ms": 0.62,
+        "llm": null
+      },
+      {
+        "stage": "memory_retrieval",
+        "iteration": 1,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:49:25.182518+00:00",
+        "duration_ms": 0.0,
+        "llm": null,
+        "detail": {
+          "mode": "jaccard",
+          "hits": 1
+        }
+      },
+      {
+        "stage": "analyze",
+        "iteration": 1,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:49:27.244753+00:00",
+        "duration_ms": 2062.88,
+        "llm": null
+      },
+      {
+        "stage": "propose",
+        "iteration": 1,
+        "phase": "proposing",
+        "timestamp": "2026-10-26T12:49:29.304572+00:00",
+        "duration_ms": 2059.11,
+        "llm": null
+      },
+      {
+        "stage": "execute",
+        "iteration": 1,
+        "phase": "executing",
+        "timestamp": "2026-10-26T12:49:32.248493+00:00",
+        "duration_ms": 2943.98,
+        "llm": null
+      },
+      {
+        "stage": "memory_retrieval",
+        "iteration": 2,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:49:32.248493+00:00",
+        "duration_ms": 0.0,
+        "llm": null,
+        "detail": {
+          "mode": "jaccard",
+          "hits": 1
+        }
+      },
+      {
+        "stage": "analyze",
+        "iteration": 2,
+        "phase": "analyzing",
+        "timestamp": "2026-10-26T12:49:34.315487+00:00",
+        "duration_ms": 2067.22,
+        "llm": null
+      },
+      {
+        "stage": "propose",
+        "iteration": 2,
+        "phase": "proposing",
+        "timestamp": "2026-10-26T12:49:36.352758+00:00",
+        "duration_ms": 2037.41,
+        "llm": null
+      },
+      {
+        "stage": "memory_write",
+        "iteration": 2,
+        "phase": "proposing",
+        "timestamp": "2026-10-26T12:49:36.352758+00:00",
+        "duration_ms": 0.0,
+        "llm": null,
+        "detail": {
+          "stored": false
+        }
+      }
+    ],
+    "created_at": "2026-10-26T12:49:25.159401+00:00",
+    "updated_at": "2026-10-26T12:49:36.352758+00:00"
+  }
+}

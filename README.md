@@ -450,6 +450,37 @@ token 标注 `1115 prompt / 393 completion`、`circuit_break` 红色高亮）。
 
 完整报告见 [docs/benchmark.md](docs/benchmark.md)（`python scripts/benchmark.py` 可复现）。
 
+## ⚔️ Chaos Engineering & Real-world Drill
+
+2026-10-26 对本系统做了一次端到端故障演练（Chaos Drill）：本地起一个真实监听
+`127.0.0.1:6379` 的 Redis 假体（RESP `PING→+PONG` 握手验证），Watch 模式监听演练日志，
+然后**突然杀掉进程并立刻注入真实报错行**——全程只用生产代码路径，零 mock 分析内核。
+
+> `2026-10-26 10:00:00 ERROR Connection refused to redis 127.0.0.1:6379`
+
+| 演练指标 | 实测结果 |
+| --- | --- |
+| 注入 → 规则开火（`critical_keywords`） | **98.9 ms**（启发式复测 694 ms，指标要求 « 5s） |
+| `port_check` 探针（Redis 已死） | `{"host":"127.0.0.1","port":6379,"open":false,"latency_ms":null}` |
+| `process_list` 探针（`name_pattern=redis`） | `{"count":0,"processes":[],"source":"psutil"}` |
+| 告警推送（FileNotifier） | 结论产出后 **41ms** 送达（`[critical] critical_keywords`） |
+| 全链路端到端（启发式模式） | **11.2s** observe → propose → execute 探针 → concluded |
+| LLM 模式全链路（qwen2.5:7b 真模型） | 70.6s / 3 iterations / 12,578 tokens / 向量记忆入库成功 |
+
+演练同时验证了 v2.0.0 的 Critic Agent 双审互搏在真实数据上的价值：真实 LLM 给出的
+初版结论偏保守（只说"存在一次连接被拒"，未断言端口/进程状态），**Critic 两轮真实
+反驳（`verdict=revise`：「根因假设无直接证据支撑」「把相关性当因果」）→ Reflexion
+重析 → 复审 pass**——批判者准确点破了分析者的证据缺口。
+
+演练也暴露并当场修复了一个真实短板：7B 规划器只提日志工具、不派探针。v2.0.1 起
+`_probe_fallback_candidates` 把 connection-refused 证据里真实出现的 `host:port` 派生的
+`port_check` / `process_list` **保底并入每一次提案**（保留 (tool, params) 去重），
+LLM 在线与否都必经"端口实测 + 进程实测"。
+
+**184 tests passing** 保障上述工程确定性（含 4 个 planner 保底探针回归用例）。
+完整演练证据（三份 Episode 全 trace + 注入时间线 + 探针原始返回）落盘于
+[docs/assets/chaos_drill_2026-10-26.json](docs/assets/chaos_drill_2026-10-26.json)。
+
 ## 插件：自定义只读探针
 
 `examples/` 提供两个插件示例：`dummy_echo_plugin.py`（最小回显）与
@@ -469,6 +500,7 @@ token 标注 `1115 prompt / 393 completion`、`circuit_break` 红色高亮）。
 - **v1.1.0**（tag）：全代码英文化 + 严格类型、结构化日志（JSON/DEBUG 彩色）、`/episodes` 每 IP 限流、ruff 0 门禁。
 - **v1.2.0**（tag）：SSE 大屏（EventBus 有界队列 + Live Terminal + trace 瀑布图）、多行堆栈合并、clusterer 单遍正则、install/Makefile。
 - **v2.0.0**（tag）：Enterprise & AGI Ready——MCP 标准化工具生态、本地语义向量记忆（Ollama Embed + Jaccard 兜底）、AST 动态安全沙箱、Critic Agent 双审互搏。
+- **v2.0.1**（tag）：混沌工程实战封板——README 新增真实故障演练报告；planner 保底探针（`_probe_fallback_candidates`：LLM 提案也必并入 `port_check`/`process_list`，去重保留）；184 tests。
 
 ## Episode 生命周期
 

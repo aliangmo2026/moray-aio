@@ -23,3 +23,5 @@ data/
 # Security plugin workspace (never commit)
 /.mimosa/
 *.json
+# 混沌演练/实测证据 JSON 刻意入库（docs/assets）
+!docs/assets/*.json
