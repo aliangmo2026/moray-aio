@@ -31,9 +31,8 @@ AI-assisted ops without giving an agent a root shell.
 ![License MIT](https://img.shields.io/badge/license-MIT-green)
 
 <div align="center">
-  <video src="docs/assets/demo_attack.mp4" autoplay loop muted playsinline width="800"></video>
+  <img src="docs/assets/demo_attack.gif" alt="AST Sandbox Defense Demo" width="800">
   <p><i>Live Demo: Intercepting malicious LLM prompt injection at the AST layer (100% real defense chain).</i></p>
-  <p><i>(If the video does not autoplay in your browser, <a href="docs/assets/demo_attack.mp4">watch the full clip here</a> — reproduce it yourself with <code>python scripts/demo_attack.py</code>.)</i></p>
 </div>
 
 **中文** · 基于本地大模型（Ollama）的 **AIOps 智能运维 Agent**，定位是「**只读分析、辅助决策**」。
