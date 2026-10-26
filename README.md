@@ -28,7 +28,7 @@ AI-assisted ops without giving an agent a root shell.
 ![Build Passing](https://img.shields.io/badge/build-passing-brightgreen)
 ![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
 ![Docker ready](https://img.shields.io/badge/docker-ready-blue)
-![License MIT](https://img.shields.io/badge/license-MIT-green)
+![License Apache 2.0 + Commons Clause](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Commons%20Clause-green)
 
 <div align="center">
   <img src="docs/assets/demo_attack.gif" alt="AST Sandbox Defense Demo" width="800">
@@ -515,3 +515,22 @@ LLM 在线与否都必经"端口实测 + 进程实测"。
 
 moray-aio 是独立进程、独立仓库、独立数据（`data/memory.sqlite3`）。
 MoRay 将来只需通过 HTTP 调用本服务即可接入分析能力；本仓库永不反向依赖 MoRay 代码。
+
+## ⚖️ License & Usage Terms
+
+**Author**: Mo Guangliang (莫光良)
+
+This project is licensed under the **Apache 2.0 License with Commons Clause**.
+
+We believe in open-source and knowledge sharing. You are highly encouraged to:
+*   ✅ **Learn & Inspect**: Read the source code to understand the architecture.
+*   ✅ **Local Testing & Personal Use**: Run, modify, and test it locally for non-commercial purposes.
+*   ✅ **Free Listing**: Publish it as a free skill on platforms like Agensi.
+
+**🚫 STRICTLY PROHIBITED (Commercial Restrictions):**
+Without explicit written permission from the author, you are **NOT** allowed to:
+*   ❌ Package this project or its derivatives as a product/service.
+*   ❌ Sell, resell, or distribute this software for any commercial fee.
+*   ❌ List it as a paid/premium skill on any marketplace (e.g., Agensi, SaaS platforms).
+
+For commercial licensing, enterprise integration, or custom consulting, please contact the author directly.
