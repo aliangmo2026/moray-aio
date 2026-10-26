@@ -116,6 +116,14 @@ def propose_tasks(
             candidates = []  # any LLM hiccup falls back to heuristics
     if not candidates:
         candidates = _heuristic_candidates(errors, log_path)
+    else:
+        # Probe fallback (chaos-drill finding, 2026-10-26): a small local LLM
+        # planner tends to propose only log tools and skip the probes that
+        # actually verify the root cause — so the read-only port_check/
+        # process_list set derived from host:port pairs in the error text is
+        # force-merged even when the LLM produced tasks (dedup below drops
+        # overlaps with LLM candidates and existing_tasks).
+        candidates = candidates + _probe_fallback_candidates(errors)
 
     accepted: List[dict] = []
     seen = {(t.get("tool"), _canon(t.get("params"))) for t in (existing_tasks or [])}
@@ -218,6 +226,48 @@ def _make_task(tool: str, params: dict, rationale: str, auto_approve_readonly: b
 
 # ---- heuristic fallback ----
 
+def _probe_fallback_candidates(errors: List[str]) -> List[dict]:
+    """Read-only probe fallback derived from host:port pairs actually present
+    in connection-refused error text — hosts/ports are never invented.
+
+    Beyond the heuristic path, these candidates are force-merged into the
+    candidate list even when the LLM planner returned tasks (see
+    propose_tasks): the2026-10-26 chaos drill showed a 7B planner that
+    proposes only log tools, while port_check/process_list are what actually
+    verify "port down / process gone"."""
+    blob = "\n".join(str(e) for e in (errors or []))
+    lower = blob.lower()
+    candidates: List[dict] = []
+    if "connection refused" not in lower and "econnrefused" not in lower:
+        return candidates
+    seen_ports = set()
+    for match in _HOST_PORT_RE.finditer(blob):
+        host = match.group(1).lower()
+        port = match.group(2)
+        if port in seen_ports:
+            continue
+        seen_ports.add(port)
+        candidates.append(
+            {
+                "tool": "port_check",
+                "params": {"host": host, "port": int(port)},
+                "rationale": "probes are read-only: check whether {}:{} is reachable now.".format(host, port),
+            }
+        )
+        hint = SERVICE_PORT_HINTS.get(port)
+        if hint:
+            candidates.append(
+                {
+                    "tool": "process_list",
+                    "params": {"name_pattern": hint},
+                    "rationale": "probes are read-only: port {} usually means {}; check the process.".format(port, hint),
+                }
+            )
+        if len(seen_ports) >= 3:
+            break  # probe at most 3 ports to avoid explosion
+    return candidates
+
+
 def _heuristic_candidates(errors: List[str], log_path: str) -> List[dict]:
     blob = "\n".join(str(e) for e in (errors or []))
     lower = blob.lower()
@@ -235,32 +285,7 @@ def _heuristic_candidates(errors: List[str], log_path: str) -> List[dict]:
                 "rationale": "Connection refused errors found; trace frequency and targets.",
             }
         )
-        # Only probe host:port pairs actually present in the error text — never invented
-        seen_ports = set()
-        for match in _HOST_PORT_RE.finditer(blob):
-            host = match.group(1).lower()
-            port = match.group(2)
-            if port in seen_ports:
-                continue
-            seen_ports.add(port)
-            candidates.append(
-                {
-                    "tool": "port_check",
-                    "params": {"host": host, "port": int(port)},
-                    "rationale": "probes are read-only: check whether {}:{} is reachable now.".format(host, port),
-                }
-            )
-            hint = SERVICE_PORT_HINTS.get(port)
-            if hint:
-                candidates.append(
-                    {
-                        "tool": "process_list",
-                        "params": {"name_pattern": hint},
-                        "rationale": "probes are read-only: port {} usually means {}; check the process.".format(port, hint),
-                    }
-                )
-            if len(seen_ports) >= 3:
-                break  # probe at most 3 ports to avoid explosion
+        candidates.extend(_probe_fallback_candidates(errors))
 
     if "timeout" in lower or "timed out" in lower:
         candidates.append(
