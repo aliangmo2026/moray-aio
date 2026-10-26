@@ -342,16 +342,59 @@ episode 终态推送结论（concluded）或错误（failed）。`MORAY_AIO_WATC
 服务启动即监听（默认关闭）；`POST /watch/start|stop`、`GET /watch/status` 手动控制；
 `python cli.py watch --log-path <path>` 直接在终端跑（Ctrl+C 优雅退出）。
 
+## v2.0.0：Enterprise & AGI Ready（四大地基改造）
+
+**1. 标准化工具生态（MCP Server）**（`app/tools/mcp_server.py`）：把全部只读工具
+（日志四件套 + 4 探针 + AST 沙箱）暴露为标准 **Model Context Protocol** 服务——
+换行分隔 JSON-RPC 2.0 over stdio，`initialize` / `tools/list` / `tools/call` /
+`ping` + 全部 `notifications/*`。任何 MCP 客户端（Claude Desktop、Cursor、
+未来的 MoRay 主项目或自研 Agent）一行配置即可调用，与模型/厂商彻底解耦。
+协议帧是 stdout 上唯一允许出现的内容（日志一律走 stderr）；工具调用走与 HTTP API
+完全相同的白名单校验，越界一律 `isError: true` 返回，协议层永不泄漏异常栈。
+
+```bash
+python -m app.tools.mcp_server   # stdio 起服务；Claude Desktop 配置示例：
+# {"mcpServers": {"moray-aio": {"command": "python", "args": ["-m", "app.tools.mcp_server"]}}}
+```
+
+**2. 本地语义长期记忆（Local Vector Memory）**（`app/kernel/vector_memory.py`）：
+Jaccard 关键词匹配升级为 **Ollama Embedding（nomic-embed-text）+ 纯 Python 向量库**
+（SQLite 存向量、余弦相似度 Top-3 检索）。`_analyze` 阶段先语义检索历史结论注入
+Prompt（「上次类似的问题，结论是这样的...」），检索模式（vector/jaccard/none）写入
+trace；结论落盘时自动 `memory_write` 向量化入库。**降级兜底**：embedding 模型缺失 /
+Ollama 宕机时自动平滑回退关键词 Jaccard 并进入退避窗口（300s），一次成功即自愈，
+绝不崩溃、绝不阻塞分析。之所以纯 Python 而非 chromadb/lancedb：二者均不支持本项目
+承诺的 Python 3.8（CI test-py38 容器），且零原生依赖、零遥测更符合离线企业部署。
+
+**3. 动态安全沙箱（AST Check & Readonly Script）**（`app/tools/dynamic_sandbox.py`）：
+遇到未知问题时 LLM 可自写一段 Python 排查片段（`execute_safe_python` 工具），但必须
+先过三道闸：**AST 静态检查**（import 白名单 math/json/psutil/socket 等只读模块、
+危险调用名黑名单、一切 dunder 访问/引用拒绝、节点白名单默认拒绝——恶意片段在生成
+code object 之前就被拒绝并告警）、**空 `__builtins__` 受限命名空间**（仅一个再校验
+白名单的 import 钩子 + 无害内建函数）、**3 秒超时熔断**（监控线程，daemon 弃置）。
+`os.system('rm -rf /')` 级别的 Prompt 注入在 AST 层直接拦截（29 条恶意载荷矩阵测试
+全灭）。`MORAY_AIO_SANDBOX_ENABLED=false` 一键下线，planner 自动不再派发。
+
+**4. 多智能体互搏审核（Critic Agent）**（`app/llm/prompts.py` + `loop.py`）：
+Analyst 给出初步结论后，**Critic Agent** 按「证据支撑 / 遗漏信息 / 逻辑跳跃 / 越界」
+四维审查；有实质反驳（verdict=revise）则把反驳意见注入 Prompt 触发 **Reflexion**
+深思轮（默认 1 轮，token 预算熔断全程计数）。每轮 `critic_review` / `reflexion`
+写入 Episode trace 并经 SSE 实时推送，大屏可见 AI 的完整内部辩论；最终裁决随
+`analysis.critic_review` 一起持久化。Critic 挂了/输出不可解析时分析照常输出——
+互搏是增强，从不是单点。
+
 ## 架构（Event-driven）
 
 ```mermaid
 flowchart TD
     W[EventWatcher<br/>os.stat 轮询日志] --> T[TriggerEngine<br/>burst / keyword / spike + 冷却]
-    T -->|watch:rule| L[EvolutionLoop<br/>Observe → Analyze → Propose → Execute]
-    L --> P[只读工具/探针<br/>log_reader / probes / plugins]
-    L --> LLM[Ollama LLM<br/>Token 熔断 + 重试退避]
+    T -->|watch:rule| L[EvolutionLoop<br/>Observe → Analyze → Critic → Propose → Execute]
+    L --> P[只读工具/探针 + AST 沙箱<br/>log_reader / probes / execute_safe_python]
+    L --> LLM[Ollama LLM<br/>Analyst + Critic 双审 / Token 熔断]
+    L --> VM[(VectorMemory<br/>Ollama Embed + 纯 Python 向量库<br/>语义检索 Top-3 / Jaccard 兜底)]
     L -->|concluded / failed| N[Notifier<br/>Console / Webhook / File]
     L --> R[(Repository<br/>SQLite / Postgres)]
+    M[MCP Clients<br/>Claude Desktop / Cursor / MoRay] -->|JSON-RPC 2.0 stdio| P
     D[Dashboard<br/>/dashboard] --> L
     D --> T
 ```
@@ -383,6 +426,14 @@ token 标注 `1115 prompt / 393 completion`、`circuit_break` 红色高亮）。
 6. **出站请求纪律**：URL 仅 http/https + host 白名单；Webhook 拒环回/私有/保留地址、防 DNS rebinding、禁重定向。
 7. **凭据纪律**：密钥只从环境变量读取；源码/示例/测试零凭据字面量。
 8. **SQL 全参数绑定**；探针只读（psutil 枚举/sc query），subprocess 一律 list + shell=False。
+9. **AST 沙箱三道闸（v2.0）**：LLM 自写片段先过静态 AST 检查（import 白名单 +
+   危险调用黑名单 + dunder 全拒 + 节点默认拒绝），再在空 `__builtins__`（仅一个
+   再校验 import 钩子）命名空间中执行，3 秒超时熔断；恶意片段在生成 code object
+   之前即被拒绝并记录告警日志。
+10. **双审反幻觉（v2.0）**：Critic Agent 审查每份 Analyst 结论（证据/遗漏/逻辑/越界），
+    反驳触发 Reflexion 深思；辩论全程进 trace + SSE，token 逐调用计数入预算熔断。
+11. **语义记忆降级纪律（v2.0）**：向量检索任何失败都平滑回退关键词 Jaccard
+    （退避 + 自愈），记忆层永远是增强而非单点。
 
 ## 性能（100MB 日志实测）
 
@@ -410,6 +461,9 @@ token 标注 `1115 prompt / 393 completion`、`circuit_break` 红色高亮）。
 - **v0.6.0**（tag）：Repository 抽象（SQLite/Postgres）、Token 熔断、API 鉴权、网络重试。
 - **v0.7.0**（tag）：事件驱动 Watch——日志监听、触发规则、Webhook 告警、自驱分析闭环。
 - **v1.0.0**（tag）：正式版——可视化控制台、压测报告、CI/LICENSE/CONTRIBUTING 开源基建、Docker 闭环。
+- **v1.1.0**（tag）：全代码英文化 + 严格类型、结构化日志（JSON/DEBUG 彩色）、`/episodes` 每 IP 限流、ruff 0 门禁。
+- **v1.2.0**（tag）：SSE 大屏（EventBus 有界队列 + Live Terminal + trace 瀑布图）、多行堆栈合并、clusterer 单遍正则、install/Makefile。
+- **v2.0.0**（tag）：Enterprise & AGI Ready——MCP 标准化工具生态、本地语义向量记忆（Ollama Embed + Jaccard 兜底）、AST 动态安全沙箱、Critic Agent 双审互搏。
 
 ## Episode 生命周期
 
