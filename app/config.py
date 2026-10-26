@@ -158,6 +158,14 @@ class Settings:
         default_factory=lambda: _env_int("MORAY_AIO_RATE_LIMIT_PER_MINUTE", 5)
     )
 
+    # ---- Dynamic AST sandbox (v2.0.0) ----
+    # Master switch for the execute_safe_python tool (LLM-written read-only
+    # snippets; statically vetted, empty builtins, hard timeout)
+    sandbox_enabled: bool = field(default_factory=lambda: _env_bool("MORAY_AIO_SANDBOX_ENABLED", True))
+    sandbox_timeout_seconds: float = field(
+        default_factory=lambda: _env_float("MORAY_AIO_SANDBOX_TIMEOUT_SECONDS", 3.0)
+    )
+
     # ---- Semantic long-term memory (v2.0.0) ----
     # Master switch; when off (or the embedding model is missing) the kernel
     # silently uses keyword Jaccard retrieval instead

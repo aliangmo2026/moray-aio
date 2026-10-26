@@ -33,6 +33,7 @@ ALLOWED_TOOLS = (
     "process_list",
     "disk_usage",
     "windows_service_status",
+    "execute_safe_python",
 )
 
 # Allowed parameter keys per tool; anything else (possibly dangerous instructions)
@@ -46,6 +47,7 @@ _TOOL_PARAM_KEYS: Dict[str, tuple] = {
     "process_list": ("name_pattern",),
     "disk_usage": ("path",),
     "windows_service_status": ("service_name",),
+    "execute_safe_python": ("code",),
 }
 
 # Common service ports -> guessed process name (used as process_list name_pattern)
@@ -137,6 +139,10 @@ def _validate_candidate(
     """Validate one candidate; returns a task dict or None (fail-closed)."""
     tool = cand.get("tool")
     if tool not in _TOOL_PARAM_KEYS:
+        return None
+    # The tool must actually be registered (plugins add tools; operators can
+    # disable the AST sandbox) — otherwise the task could never execute.
+    if tools.get_tool(tool) is None:
         return None
     raw_params = cand.get("params")
     if not isinstance(raw_params, dict):

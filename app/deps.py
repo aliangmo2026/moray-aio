@@ -42,6 +42,8 @@ def get_tools() -> ToolRegistry:
         probe_max_processes=settings.probe_max_processes,
         probe_output_max_bytes=settings.probe_output_max_bytes,
         plugin_dirs=settings.plugin_dirs,
+        sandbox_enabled=settings.sandbox_enabled,
+        sandbox_timeout_seconds=settings.sandbox_timeout_seconds,
     )
 
 

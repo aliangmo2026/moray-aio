@@ -15,8 +15,14 @@ READONLY_TOOLS: Set[str] = {"log_tail", "log_grep", "list_files", "log_rolling_t
 # probes only observe system state, they never read log files
 PROBE_TOOLS: Set[str] = {"port_check", "process_list", "disk_usage", "windows_service_status"}
 
-# Everything auto/batch approval may release (log tools + probes)
-SAFE_TOOLS: Set[str] = READONLY_TOOLS | PROBE_TOOLS
+# AST-sandboxed snippet execution (v2.0): read-only by construction — snippets are
+# statically vetted (allowlisted imports, no dunder access, no file/process verbs),
+# run with empty __builtins__ under a hard timeout; operators can disable the tool
+# entirely via MORAY_AIO_SANDBOX_ENABLED=false
+SANDBOX_TOOLS: Set[str] = {"execute_safe_python"}
+
+# Everything auto/batch approval may release (log tools + probes + AST sandbox)
+SAFE_TOOLS: Set[str] = READONLY_TOOLS | PROBE_TOOLS | SANDBOX_TOOLS
 
 # Any token hit (case-insensitive substring) classifies the task as high risk
 HIGH_RISK_TOKENS: Set[str] = {"kill", "reboot", "restart", "shutdown", "rm ", "del ", "format"}

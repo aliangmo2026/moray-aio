@@ -33,12 +33,16 @@ class ToolRegistry:
         probe_max_processes: int = 50,
         probe_output_max_bytes: int = 4096,
         plugin_dirs: Optional[List[str]] = None,
+        sandbox_enabled: bool = True,
+        sandbox_timeout_seconds: float = 3.0,
     ):
         self.readonly_roots = [Path(r) for r in (readonly_roots or [])]
         self.max_scan_bytes = int(max_scan_bytes)
         self.probe_host_whitelist = tuple(probe_host_whitelist or _DEFAULT_PROBE_HOSTS)
         self.probe_max_processes = int(probe_max_processes)
         self.probe_output_max_bytes = int(probe_output_max_bytes)
+        self.sandbox_enabled = bool(sandbox_enabled)
+        self.sandbox_timeout_seconds = float(sandbox_timeout_seconds)
         self._tools: Dict[str, BaseTool] = {}
         self.plugin_errors: List[str] = []
         self._register_builtins()
@@ -75,6 +79,7 @@ class ToolRegistry:
             ProcessListTool,
             WindowsServiceStatusTool,
         )
+        from app.tools.builtin.sandbox_tool import ExecuteSafePythonTool
 
         for tool in (
             LogTailTool(self),
@@ -87,6 +92,11 @@ class ToolRegistry:
             WindowsServiceStatusTool(self),
         ):
             self.register_tool(tool)
+        # The dynamic AST sandbox is optional: an operator can disable it entirely
+        # via MORAY_AIO_SANDBOX_ENABLED=false, after which the planner can no
+        # longer propose execute_safe_python tasks (unknown tools are dropped).
+        if self.sandbox_enabled:
+            self.register_tool(ExecuteSafePythonTool(self))
 
     # ---- dynamic plugin loading ----
 
