@@ -174,6 +174,11 @@ class ToolRegistry:
     def names(self) -> List[str]:
         return sorted(self._tools)
 
+    def get_tool(self, name: str) -> Optional[BaseTool]:
+        """Public accessor for one registered tool (None when missing); used by
+        adapters like the MCP server to read name/description/inputSchema."""
+        return self._tools.get(name)
+
     def call(self, name: str, params: Optional[dict] = None) -> Any:
         tool = self._tools.get(name)
         if tool is None:
