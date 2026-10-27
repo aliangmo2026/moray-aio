@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moray-aio"
+version = "3.0.0"
+description = "Read-only AIOps agent: log watching, local-LLM analysis, system probes, process-isolated AST sandbox and an MCP server for Claude Desktop / Cursor"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0 with Commons Clause" }
+authors = [{ name = "Mo Guangliang (莫光良)" }]
+keywords = [
+    "aiops", "observability", "incident-response", "llm", "ollama",
+    "mcp", "model-context-protocol", "sandbox", "read-only",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: System :: Monitoring",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = [
+    "fastapi>=0.100",
+    "httpx>=0.24",
+    "psutil>=5.9",
+    "uvicorn[standard]>=0.23",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.6,<0.18",
+]
+postgres = [
+    "psycopg2-binary>=2.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/aliangmo2026/moray-aio"
+Repository = "https://github.com/aliangmo2026/moray-aio"
+Issues = "https://github.com/aliangmo2026/moray-aio/issues"
+Report-a-security-issue = "https://github.com/aliangmo2026/moray-aio/security"
+
+[project.scripts]
+# MCP server over stdio -- point Claude Desktop / Cursor at this command
+moray-mcp = "app.tools.mcp_server:main"
+# Engine CLI: serve / run / health / watch
+moray-aio = "cli:main"
+
+[tool.setuptools]
+# cli.py is a root-level module; the app package tree carries the engine
+py-modules = ["cli"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+# dashboard page ships inside the package and is served by app/api/dashboard.py
+app = ["templates/*.html"]

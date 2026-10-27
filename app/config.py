@@ -44,7 +44,7 @@ class Settings:
     """Read-only settings. Defaults target the MoRay main project; override via MORAY_AIO_* env vars."""
 
     app_name: str = "moray-aio"
-    version: str = "2.0.1"
+    version: str = "3.0.0"
 
     # HTTP service
     host: str = field(default_factory=lambda: _env_str("MORAY_AIO_HOST", "127.0.0.1"))

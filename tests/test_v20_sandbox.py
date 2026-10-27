@@ -9,6 +9,7 @@ side effect (there must be none to observe).
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -157,6 +158,50 @@ def test_timeout_circuit_breaker():
     assert outcome["status"] == "timeout"
     assert "0.5" in outcome["error"]
     assert elapsed < 5.0  # bounded well below the pathological infinite loop
+
+
+# ---------- process-pool isolation (v3.0): OS-level kill ----------
+
+
+def test_worker_pool_is_json_only_and_reusable():
+    outcome = execute_safe_python("print('x')\n21 * 2")
+    assert outcome["status"] == "ok"
+    assert outcome["result"] == "42"
+    # worker-side contract: every value crossing the IPC boundary is JSON-safe
+    from app.tools.dynamic_sandbox import _execute_vetted_snippet
+
+    side = _execute_vetted_snippet("print('x')\n21 * 2", 1024)
+    assert side["status"] == "ok"
+    json.dumps(side)
+
+
+def test_gil_bomb_is_physically_terminated():
+    """sum(range(10**9)) is a pure C-level loop holding the GIL for tens of
+    seconds — no thread-based breaker could ever interrupt it. The process
+    pool must kill the worker with the OS and keep serving afterwards."""
+    warm = execute_safe_python("1 + 1")  # make sure the pool is up first
+    assert warm["status"] == "ok"
+
+    started = time.perf_counter()
+    outcome = execute_safe_python("sum(range(10 ** 9))", timeout=0.5)
+    elapsed = time.perf_counter() - started
+    assert outcome["status"] == "timeout"
+    assert "0.5" in outcome["error"]
+    assert "process-pool" in outcome["error"]
+    assert elapsed < 15.0  # the kill lands promptly, not after 10**9 iterations
+
+    after = execute_safe_python("21 * 2")  # fresh worker serves the next task
+    assert after["status"] == "ok"
+    assert after["result"] == "42"
+
+
+def test_pool_shutdown_then_lazy_respawn():
+    from app.tools.dynamic_sandbox import shutdown_sandbox_pool
+
+    shutdown_sandbox_pool()
+    outcome = execute_safe_python("3 * 3")
+    assert outcome["status"] == "ok"
+    assert outcome["result"] == "9"
 
 
 def test_output_byte_cap():

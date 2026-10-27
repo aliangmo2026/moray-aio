@@ -15,6 +15,26 @@ plug them in with one line of config.
 - Runtime: Python 3.8+, local Ollama optional (service never depends on it)
 - Safety: read-only by design — it never writes, truncates, restarts or
   deletes anything; dangerous actions only ever appear as suggestion text.
+  LLM-written sandbox snippets run in an OS-isolated worker process
+  (multiprocessing pool; timeout = physical `terminate()`), verified by a
+  198-payload red-team fuzzing campaign with 0 escapes.
+
+## 📦 Install (pip)
+
+```bash
+pip install moray-aio                # from PyPI
+# or straight from the repository
+pip install git+https://github.com/aliangmo2026/moray-aio.git
+```
+
+This provides two commands:
+
+- `moray-mcp` — the MCP server over stdio; point Claude Desktop / Cursor at it:
+  `{ "mcpServers": { "moray-aio": { "command": "moray-mcp" } } }`
+- `moray-aio` — the engine CLI (`serve` / `run` / `health` / `watch`)
+
+For local development, clone the repository and use
+`bash install.sh` (or `install.ps1` on Windows) instead.
 
 ## ⚖️ License & Usage Terms
 

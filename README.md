@@ -25,7 +25,8 @@ AI-assisted ops without giving an agent a root shell.
      uncomment the line below. -->
 <!-- ![moray-aio live demo](docs/assets/demo.gif) -->
 
-![Build Passing](https://img.shields.io/badge/build-passing-brightgreen)
+![CI](https://github.com/aliangmo2026/moray-aio/actions/workflows/ci.yml/badge.svg)
+![PyPI](https://img.shields.io/pypi/v/moray-aio.svg)
 ![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
 ![Docker ready](https://img.shields.io/badge/docker-ready-blue)
 ![License Apache 2.0 + Commons Clause](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Commons%20Clause-green)
@@ -38,7 +39,30 @@ AI-assisted ops without giving an agent a root shell.
 **中文** · 基于本地大模型（Ollama）的 **AIOps 智能运维 Agent**，定位是「**只读分析、辅助决策**」。
 事件驱动：主动监听日志 → 规则触发 → 自驱分析 → Webhook 告警；独立引擎通过 HTTP 供外部系统接入。
 
-## Quick Start (one command)
+## 📦 Install (pip)
+
+```bash
+pip install moray-aio                # from PyPI
+# or straight from the repository
+pip install git+https://github.com/aliangmo2026/moray-aio.git
+```
+
+After installation you get two commands:
+
+```bash
+moray-mcp                            # MCP server over stdio (Claude Desktop / Cursor)
+moray-aio serve                      # HTTP analysis service (127.0.0.1:8020)
+moray-aio run --auto-approve         # one full analysis in the terminal
+moray-aio health                     # service health check
+```
+
+Plug the MCP server into Claude Desktop / Cursor with one line of config:
+
+```json
+{ "mcpServers": { "moray-aio": { "command": "moray-mcp" } } }
+```
+
+## Quick Start (one command, from source)
 
 ```bash
 # Linux / macOS
@@ -431,14 +455,31 @@ token 标注 `1115 prompt / 393 completion`、`circuit_break` 红色高亮）。
 6. **出站请求纪律**：URL 仅 http/https + host 白名单；Webhook 拒环回/私有/保留地址、防 DNS rebinding、禁重定向。
 7. **凭据纪律**：密钥只从环境变量读取；源码/示例/测试零凭据字面量。
 8. **SQL 全参数绑定**；探针只读（psutil 枚举/sc query），subprocess 一律 list + shell=False。
-9. **AST 沙箱三道闸（v2.0）**：LLM 自写片段先过静态 AST 检查（import 白名单 +
-   危险调用黑名单 + dunder 全拒 + 节点默认拒绝），再在空 `__builtins__`（仅一个
-   再校验 import 钩子）命名空间中执行，3 秒超时熔断；恶意片段在生成 code object
-   之前即被拒绝并记录告警日志。
+9. **AST 沙箱多道闸（v3.0 进程隔离）**：LLM 自写片段先过静态 AST 检查（import 白名单 +
+   危险调用引用期/调用期双拒 + dunder 与解释器内部属性全拒 + 调用目标必须可解析 +
+   常量折叠守卫），然后**只在独立的 worker 进程中**执行（multiprocessing 池、JSON-only IPC、
+   socket/itertools 运行时门面）；超时由操作系统级 `process.terminate()` 物理击杀——
+   连单段 C 调用持住 GIL 的算术炸弹都能被杀掉，彻底告别线程熔断的 GIL 锁死问题。
 10. **双审反幻觉（v2.0）**：Critic Agent 审查每份 Analyst 结论（证据/遗漏/逻辑/越界），
     反驳触发 Reflexion 深思；辩论全程进 trace + SSE，token 逐调用计数入预算熔断。
 11. **语义记忆降级纪律（v2.0）**：向量检索任何失败都平滑回退关键词 Jaccard
     （退避 + 自愈），记忆层永远是增强而非单点。
+
+## 🔒 Security: Red-Blue Adversarial Fuzzing（v3.0 硬核背书）
+
+AST 沙箱经过一轮红蓝对抗 Fuzzing 实战检验：**198 条恶意 payload（7 大攻击类别）
++ 25 条良性对照 —— 0 逃逸、0 误报，拦截率 100%**。
+
+- **语料**：`os.system`/`shutil.rmtree` 基础破坏、`__import__`/`importlib` 导入越狱、
+  `__builtins__`/`__class__`/`__subclasses__`/生成器帧阶梯等沙箱逃逸、
+  Base64/Hex/Unicode 同形字混淆执行、资源耗尽炸弹、SSH 私钥窃取 + DNS 外带等 SSRF 向量。
+- **首轮战果**：23 条真实逃逸（别名洗白调用名、非 dunder 帧阶梯、下标调用绕过、
+  format 字符串穿越、DNS 逃生舱、GIL 熔断失效类）——全部定位根因、修复、四轮迭代至归零。
+- **v3.0 进程隔离**：片段只在独立 worker 进程执行，超时 = OS 级 `terminate()` 物理击杀；
+  钻地弹演练 `sum(range(10**9))`（C 层循环持 GIL，旧线程熔断无解）**1.5 秒内被击杀**，
+  池子立刻恢复服务。
+- 复现：`python scripts\security_fuzzer.py`（退出码 0 当且仅当 0 逃逸，可挂 CI 门禁）；
+  完整报告见 [docs/security_fuzzing_report.md](docs/security_fuzzing_report.md)。
 
 ## 性能（100MB 日志实测）
 
@@ -501,6 +542,9 @@ LLM 在线与否都必经"端口实测 + 进程实测"。
 - **v1.2.0**（tag）：SSE 大屏（EventBus 有界队列 + Live Terminal + trace 瀑布图）、多行堆栈合并、clusterer 单遍正则、install/Makefile。
 - **v2.0.0**（tag）：Enterprise & AGI Ready——MCP 标准化工具生态、本地语义向量记忆（Ollama Embed + Jaccard 兜底）、AST 动态安全沙箱、Critic Agent 双审互搏。
 - **v2.0.1**（tag）：混沌工程实战封板——README 新增真实故障演练报告；planner 保底探针（`_probe_fallback_candidates`：LLM 提案也必并入 `port_check`/`process_list`，去重保留）；184 tests。
+- **v3.0.0**：安全架构升维——沙箱红蓝对抗 Fuzzing（198 payloads / 0 逃逸）后全面加固 +
+  **多进程隔离执行**（`SandboxWorkerPool`：JSON-only IPC、超时 OS 级物理击杀、GIL 炸弹演练归零）+
+  标准化打包（`pip install moray-aio` → `moray-mcp` / `moray-aio` 命令）。
 
 ## Episode 生命周期
 
