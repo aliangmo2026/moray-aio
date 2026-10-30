@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "moray-aio": {
+      "type": "stdio",
+      "command": "moray-mcp",
+      "args": [],
+      "env": {
+        "MORAY_AIO_READONLY_ROOTS": "D:\\MoRay\\logs",
+        "MORAY_AIO_PROBE_HOST_WHITELIST": "127.0.0.1;localhost;::1",
+        "MORAY_AIO_SANDBOX_ENABLED": "true",
+        "MORAY_AIO_SANDBOX_TIMEOUT_SECONDS": "3.0",
+        "MORAY_AIO_MAX_SCAN_BYTES": "5242880",
+        "MORAY_AIO_RATE_LIMIT_PER_MINUTE": "5",
+        "MORAY_AIO_RECENT_ERROR_LIMIT": "10",
+        "MORAY_AIO_LOG_LEVEL": "INFO"
+      },
+      "description": "MoRay AIOps read-only probe: log tail/grep, port check, process list, disk usage, sandboxed Python"
+    }
+  }
+}

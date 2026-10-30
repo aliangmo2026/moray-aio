@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.0",
+  "connector": {
+    "id": "moray-aio",
+    "name": "moray-aio",
+    "display_name": "MoRay AIOps 探针",
+    "description": "专为 AI 打造的绝对安全、只读的运维探针底座。具备防 Prompt 注入、防越权执行能力。",
+    "version": "3.0.0",
+    "author": {
+      "name": "Mo Guangliang (莫光良)",
+      "email": "",
+      "url": "https://github.com/aliangmo2026"
+    },
+    "homepage": "https://github.com/aliangmo2026/moray-aio",
+    "repository": "https://github.com/aliangmo2026/moray-aio",
+    "license": "Apache-2.0 with Commons Clause",
+    "keywords": [
+      "aiops",
+      "observability",
+      "logs",
+      "read-only",
+      "sandbox",
+      "mcp"
+    ],
+    "icon": "icon.svg",
+    "mcp": {
+      "config": "mcp.json"
+    },
+    "transport": "stdio",
+    "requirements": {
+      "python": ">=3.8",
+      "install": "pip install moray-aio>=3.0.0"
+    },
+    "security": {
+      "read_only": true,
+      "prompt_injection_resistant": true,
+      "sandboxed_execution": true,
+      "fail_closed": true,
+      "notes": "所有路径读取受 MORAY_AIO_READONLY_ROOTS 白名单约束；网络探测受 MORAY_AIO_PROBE_HOST_WHITELIST 约束（默认仅回环）；execute_safe_python 在进程隔离沙箱中运行，空 builtins + 硬超时。"
+    }
+  }
+}

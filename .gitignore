@@ -28,3 +28,5 @@ data/
 *.json
 # 混沌演练/实测证据 JSON 刻意入库（docs/assets）
 !docs/assets/*.json
+# WorkBuddy 连接器接入包刻意入库
+!workbuddy-connector/*.json
